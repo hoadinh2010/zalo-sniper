@@ -38,7 +38,12 @@ class AIAnalyzer:
         """Extract JSON from Claude response (may have surrounding text)."""
         start = text.find("{")
         end = text.rfind("}") + 1
-        return json.loads(text[start:end])
+        if start == -1 or end == 0:
+            raise ValueError(f"No JSON object found in Claude response: {text[:200]!r}")
+        try:
+            return json.loads(text[start:end])
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid JSON in Claude response: {exc}") from exc
 
     async def classify_messages(self, messages: List[Message]) -> Dict[str, Any]:
         """Classify messages as bug_report or noise."""
@@ -55,6 +60,8 @@ class AIAnalyzer:
         self, messages: List[Message], repos: List[RepoConfig]
     ) -> Tuple[str, str, str]:
         """Select the most likely affected repo. Returns (owner, name, reason)."""
+        if not repos:
+            raise ValueError("select_repo called with empty repos list")
         chat = _messages_to_text(messages)
         repo_list = "\n".join(
             f"- {r.name}: {r.description}" for r in repos

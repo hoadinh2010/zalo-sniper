@@ -35,7 +35,11 @@ def parse_message_time(time_str: str) -> datetime:
         parts = time_str.split()
         day, month = map(int, parts[0].split("/"))
         h, m = map(int, parts[1].split(":"))
-        return now.replace(month=month, day=day, hour=h, minute=m, second=0, microsecond=0)
+        candidate = now.replace(month=month, day=day, hour=h, minute=m, second=0, microsecond=0)
+        # Guard against year rollover (e.g., Dec 31 message parsed in Jan)
+        if candidate > now:
+            candidate = candidate.replace(year=now.year - 1)
+        return candidate
 
     # Format: "HH:MM" (today)
     h, m = map(int, time_str.split(":"))
@@ -57,6 +61,7 @@ class ZaloListener:
         self._page: Optional[Page] = None
         self._browser: Optional[Browser] = None
         self._context: Optional[BrowserContext] = None
+        self._pw = None
         self._running = False
         # Track last seen timestamp per group for deduplication
         self._last_seen: Dict[str, datetime] = {}
@@ -67,8 +72,8 @@ class ZaloListener:
         session_dir.mkdir(parents=True, exist_ok=True)
         state_file = session_dir / "state.json"
 
-        pw = await async_playwright().start()
-        self._browser = await pw.chromium.launch(headless=headless)
+        self._pw = await async_playwright().start()
+        self._browser = await self._pw.chromium.launch(headless=headless)
 
         if state_file.exists():
             self._context = await self._browser.new_context(storage_state=str(state_file))
@@ -210,3 +215,5 @@ class ZaloListener:
         self._running = False
         if self._browser:
             await self._browser.close()
+        if self._pw:
+            await self._pw.stop()
