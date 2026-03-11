@@ -93,7 +93,12 @@ class CodeAgent:
                 "git", "-C", repo_dir, "apply", "--index", patch_file,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
             )
-            _, stderr = await proc.communicate()
+            try:
+                _, stderr = await asyncio.wait_for(proc.communicate(), timeout=60.0)
+            except asyncio.TimeoutError:
+                proc.kill()
+                logger.error("git apply timed out")
+                return False
             if proc.returncode != 0:
                 logger.error(f"patch apply failed: {stderr.decode()}")
                 return False
