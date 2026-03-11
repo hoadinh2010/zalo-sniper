@@ -54,9 +54,9 @@ async def run(config_path: str, relogin: bool = False) -> None:
         config=config, db=db, bus=bus,
         alert_fn=lambda msg: asyncio.create_task(
             telegram.send_message(
-                list(config.groups.values())[0].telegram_chat_id, msg
+                next(iter(config.groups.values())).telegram_chat_id, msg
             )
-        ),
+        ) if config.groups else None,
     )
 
     headless = not relogin

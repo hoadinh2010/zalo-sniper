@@ -68,11 +68,16 @@ class TelegramBot:
         await self._app.stop()
         await self._app.shutdown()
 
-    async def send_message(self, chat_id: int, text: str) -> Optional[int]:
-        msg = await self._app.bot.send_message(
-            chat_id=chat_id, text=text, parse_mode="Markdown"
-        )
-        return msg.message_id
+    async def send_message(self, chat_id: int, text: str, parse_mode: Optional[str] = None) -> Optional[int]:
+        """Send a plain text message. Pass parse_mode='Markdown' only for formatted content."""
+        try:
+            msg = await self._app.bot.send_message(
+                chat_id=chat_id, text=text, parse_mode=parse_mode
+            )
+            return msg.message_id
+        except Exception as e:
+            logger.error(f"Failed to send Telegram message to {chat_id}: {e}")
+            return None
 
     async def send_bug_notification(self, chat_id: int, analysis: BugAnalysis) -> Optional[int]:
         text = format_bug_message(analysis)

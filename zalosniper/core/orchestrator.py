@@ -90,7 +90,11 @@ class Orchestrator:
             return
 
         # Select repo
-        owner, name, reason = await self._ai.select_repo(messages, group_config.repos)
+        try:
+            owner, name, reason = await self._ai.select_repo(messages, group_config.repos)
+        except Exception as e:
+            logger.error(f"Claude select_repo failed for group {group_name!r}: {e}")
+            return
 
         # Create pending analysis record
         analysis = BugAnalysis(
@@ -182,12 +186,14 @@ class Orchestrator:
             patch_ok = await self._code_agent.apply_patch(patch, repo_dir)
             if not patch_ok:
                 raise RuntimeError("git apply failed — patch could not be applied cleanly")
-            await self._code_agent.create_branch_and_push(
+            push_ok = await self._code_agent.create_branch_and_push(
                 repo_dir, branch_name,
                 f"fix: bug-{analysis_id} from ZaloSniper",
                 self._config.github_token,
                 analysis.repo_owner, analysis.repo_name,
             )
+            if not push_ok:
+                raise RuntimeError(f"Failed to push branch {branch_name!r}")
 
             # Create PR
             pr_url, pr_number = self._github.create_pull_request(
