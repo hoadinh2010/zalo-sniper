@@ -45,6 +45,8 @@ class GroupConfig:
 
 
 class ConfigManager:
+    _db = None
+
     def __init__(self, path: str = "config.yaml") -> None:
         with open(path) as f:
             raw = yaml.safe_load(f)
@@ -165,6 +167,8 @@ class ConfigManager:
 
     async def reload_groups(self) -> None:
         """Reload groups from DB into memory (called after enable/disable)."""
+        if self._db is None:
+            raise RuntimeError("reload_groups() requires a DB-backed ConfigManager (use from_db())")
         groups_rows = await self._db.get_all_groups()
         self._groups = {}
         for g in groups_rows:

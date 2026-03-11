@@ -389,6 +389,11 @@ class Database:
             settings["ai_model"] = ai["model"]
         if ai.get("base_url"):
             settings["ai_base_url"] = ai["base_url"]
+        if ai.get("api_key"):
+            # Store under the provider-specific key
+            provider = settings.get("ai_provider", ai.get("provider", "gemini"))
+            key_name = "gemini_api_key" if provider == "gemini" else "zai_api_key" if provider == "zai" else "ai_api_key"
+            settings[key_name] = ai["api_key"]
 
         await self.set_many_settings(settings)
 
