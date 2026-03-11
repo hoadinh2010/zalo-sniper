@@ -1,0 +1,33 @@
+# ZaloSniper configuration template
+# Copy to config.yaml and fill in values
+
+dry_run: false   # true = analyse only, never create PR or task
+
+telegram:
+  bot_token: "YOUR_BOT_TOKEN"
+  approved_user_ids: [123456789]   # Telegram user IDs allowed to approve fixes
+
+zalo:
+  session_dir: "./zalo_session"
+  poll_interval_seconds: 30
+
+github:
+  token: "ghp_YOUR_TOKEN"
+  pr_enabled: true   # false = push branch only, no PR
+
+groups:
+  "Tên Group Zalo ABC":
+    repos:
+      - owner: "myorg"
+        name: "backend-abc"
+        branch: "main"
+        description: "Backend API cho dự án ABC"
+      - owner: "myorg"
+        name: "frontend-abc"
+        branch: "main"
+        description: "Frontend React cho dự án ABC"
+    telegram_chat_id: -1001234567890
+    openproject:
+      url: "https://openproject.example.com"
+      api_key: "YOUR_OP_API_KEY"
+      project_id: 1

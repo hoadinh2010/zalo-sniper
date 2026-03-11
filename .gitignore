@@ -1,0 +1,9 @@
+config.yaml
+zalo_session/
+*.db
+*.db-wal
+*.db-shm
+__pycache__/
+*.pyc
+.env
+repos/
