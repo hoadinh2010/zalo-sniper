@@ -97,11 +97,19 @@ class TelegramBot:
             return
 
         await query.answer()
-        action, analysis_id_str = query.data.split(":", 1)
-        analysis_id = int(analysis_id_str)
+        try:
+            action, analysis_id_str = query.data.split(":", 1)
+            analysis_id = int(analysis_id_str)
+        except (ValueError, AttributeError):
+            logger.warning(f"Malformed callback data: {query.data!r}")
+            await query.answer("Invalid callback data.")
+            return
 
         if self._on_callback:
-            asyncio.create_task(self._on_callback(analysis_id, action, user_id))
+            task = asyncio.create_task(self._on_callback(analysis_id, action, user_id))
+            task.add_done_callback(
+                lambda t: logger.error(f"Callback error: {t.exception()}") if not t.cancelled() and t.exception() else None
+            )
 
     # --- Commands ---
 
@@ -127,6 +135,9 @@ class TelegramBot:
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
     async def _cmd_pending(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._db:
+            await update.message.reply_text("Database not configured.")
+            return
         pending = await self._db.get_pending_analyses()
         if not pending:
             await update.message.reply_text("✅ Không có bug nào đang chờ approve.")
@@ -135,6 +146,9 @@ class TelegramBot:
         await update.message.reply_text("⏳ *Pending bugs:*\n" + "\n".join(lines), parse_mode="Markdown")
 
     async def _cmd_summary(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._db or not self._ai:
+            await update.message.reply_text("Service not configured.")
+            return
         args = context.args
         if not args:
             await update.message.reply_text("Usage: /summary <group_name>")
@@ -149,6 +163,9 @@ class TelegramBot:
         await update.message.reply_text(f"📋 *Tóm tắt - {group_name}*\n\n{summary}", parse_mode="Markdown")
 
     async def _cmd_ask(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._db or not self._ai:
+            await update.message.reply_text("Service not configured.")
+            return
         args = context.args
         if len(args) < 2:
             await update.message.reply_text("Usage: /ask <group_name> <câu hỏi>")
@@ -175,6 +192,9 @@ class TelegramBot:
         await update.message.reply_text(answer)
 
     async def _cmd_history(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._db:
+            await update.message.reply_text("Database not configured.")
+            return
         args = context.args
         group_name = " ".join(args) if args else None
         analyses = await self._db.get_recent_analyses(group_name=group_name, days=30)

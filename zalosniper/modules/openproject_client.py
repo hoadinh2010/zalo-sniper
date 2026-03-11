@@ -1,3 +1,4 @@
+import base64
 import logging
 from typing import Optional, Tuple
 import aiohttp
@@ -48,5 +49,4 @@ class OpenProjectClient:
 
 
 def _encode_api_key(api_key: str) -> str:
-    import base64
     return base64.b64encode(f"apikey:{api_key}".encode()).decode()
