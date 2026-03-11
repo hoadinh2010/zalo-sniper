@@ -50,6 +50,41 @@ BEGIN
 END;
 """
 
+SCHEMA_V2 = """
+CREATE TABLE IF NOT EXISTS settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS zalo_groups (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_name       TEXT NOT NULL UNIQUE,
+    telegram_chat_id INTEGER NOT NULL,
+    enabled          INTEGER NOT NULL DEFAULT 1,
+    created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS group_repos (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id    INTEGER NOT NULL REFERENCES zalo_groups(id) ON DELETE CASCADE,
+    owner       TEXT NOT NULL,
+    repo_name   TEXT NOT NULL,
+    branch      TEXT NOT NULL DEFAULT 'main',
+    description TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS group_openproject (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id       INTEGER NOT NULL UNIQUE REFERENCES zalo_groups(id) ON DELETE CASCADE,
+    op_url         TEXT NOT NULL DEFAULT '',
+    op_api_key     TEXT NOT NULL DEFAULT '',
+    op_project_id  TEXT NOT NULL DEFAULT ''
+);
+
+PRAGMA foreign_keys = ON;
+"""
+
 
 class Database:
     def __init__(self, path: str = "zalosniper.db") -> None:
@@ -60,6 +95,7 @@ class Database:
         self._conn = await aiosqlite.connect(self._path)
         self._conn.row_factory = aiosqlite.Row
         await self._conn.executescript(SCHEMA)
+        await self._conn.executescript(SCHEMA_V2)
         await self._conn.commit()
 
     async def close(self) -> None:
@@ -189,6 +225,158 @@ class Database:
         async with self._conn.execute(query, params) as cur:
             rows = await cur.fetchall()
         return [_row_to_analysis(r) for r in rows]
+
+    # --- Settings ---
+
+    async def get_setting(self, key: str) -> Optional[str]:
+        async with self._conn.execute(
+            "SELECT value FROM settings WHERE key = ?", (key,)
+        ) as cur:
+            row = await cur.fetchone()
+        return row["value"] if row else None
+
+    async def set_setting(self, key: str, value: str) -> None:
+        await self._conn.execute(
+            """INSERT INTO settings (key, value, updated_at)
+               VALUES (?, ?, datetime('now'))
+               ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at""",
+            (key, value),
+        )
+        await self._conn.commit()
+
+    async def get_all_settings(self) -> dict:
+        async with self._conn.execute("SELECT key, value FROM settings") as cur:
+            rows = await cur.fetchall()
+        return {row["key"]: row["value"] for row in rows}
+
+    async def set_many_settings(self, items: dict) -> None:
+        for key, value in items.items():
+            await self.set_setting(key, value)
+
+    # --- Groups ---
+
+    async def get_all_groups(self) -> list:
+        async with self._conn.execute(
+            "SELECT id, group_name, telegram_chat_id, enabled, created_at FROM zalo_groups ORDER BY id"
+        ) as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def create_group(self, group_name: str, telegram_chat_id: int) -> int:
+        async with self._conn.execute(
+            "INSERT INTO zalo_groups (group_name, telegram_chat_id) VALUES (?, ?)",
+            (group_name, telegram_chat_id),
+        ) as cur:
+            await self._conn.commit()
+            return cur.lastrowid
+
+    async def update_group(self, group_id: int, **kwargs) -> bool:
+        if not kwargs:
+            return False
+        set_clause = ", ".join(f"{k} = ?" for k in kwargs)
+        values = list(kwargs.values()) + [group_id]
+        async with self._conn.execute(
+            f"UPDATE zalo_groups SET {set_clause} WHERE id = ?", values
+        ) as cur:
+            await self._conn.commit()
+            return cur.rowcount > 0
+
+    async def delete_group(self, group_id: int) -> bool:
+        async with self._conn.execute(
+            "DELETE FROM zalo_groups WHERE id = ?", (group_id,)
+        ) as cur:
+            await self._conn.commit()
+            return cur.rowcount > 0
+
+    # --- Repos ---
+
+    async def get_group_repos(self, group_id: int) -> list:
+        async with self._conn.execute(
+            "SELECT id, group_id, owner, repo_name, branch, description FROM group_repos WHERE group_id = ?",
+            (group_id,),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
+    async def add_group_repo(self, group_id: int, owner: str, repo_name: str, branch: str, description: str) -> int:
+        async with self._conn.execute(
+            "INSERT INTO group_repos (group_id, owner, repo_name, branch, description) VALUES (?, ?, ?, ?, ?)",
+            (group_id, owner, repo_name, branch, description),
+        ) as cur:
+            await self._conn.commit()
+            return cur.lastrowid
+
+    async def update_group_repo(self, repo_id: int, **kwargs) -> bool:
+        if not kwargs:
+            return False
+        set_clause = ", ".join(f"{k} = ?" for k in kwargs)
+        values = list(kwargs.values()) + [repo_id]
+        async with self._conn.execute(
+            f"UPDATE group_repos SET {set_clause} WHERE id = ?", values
+        ) as cur:
+            await self._conn.commit()
+            return cur.rowcount > 0
+
+    async def delete_group_repo(self, repo_id: int) -> bool:
+        async with self._conn.execute(
+            "DELETE FROM group_repos WHERE id = ?", (repo_id,)
+        ) as cur:
+            await self._conn.commit()
+            return cur.rowcount > 0
+
+    # --- OpenProject ---
+
+    async def get_group_openproject(self, group_id: int) -> Optional[dict]:
+        async with self._conn.execute(
+            "SELECT id, group_id, op_url, op_api_key, op_project_id FROM group_openproject WHERE group_id = ?",
+            (group_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        return dict(row) if row else None
+
+    async def upsert_group_openproject(self, group_id: int, op_url: str, op_api_key: str, op_project_id: str) -> None:
+        await self._conn.execute(
+            """INSERT INTO group_openproject (group_id, op_url, op_api_key, op_project_id)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(group_id) DO UPDATE SET
+                   op_url=excluded.op_url,
+                   op_api_key=excluded.op_api_key,
+                   op_project_id=excluded.op_project_id""",
+            (group_id, op_url, op_api_key, op_project_id),
+        )
+        await self._conn.commit()
+
+    # --- Dashboard stats ---
+
+    async def get_dashboard_stats(self) -> dict:
+        async with self._conn.execute(
+            "SELECT COUNT(*) as c FROM bug_analyses WHERE status = 'done'"
+        ) as cur:
+            bugs_done = (await cur.fetchone())["c"]
+        async with self._conn.execute(
+            "SELECT COUNT(*) as c FROM zalo_groups WHERE enabled = 1"
+        ) as cur:
+            groups_active = (await cur.fetchone())["c"]
+        async with self._conn.execute(
+            "SELECT COUNT(*) as c FROM bug_analyses WHERE status = 'pending'"
+        ) as cur:
+            pending = (await cur.fetchone())["c"]
+        async with self._conn.execute(
+            "SELECT COUNT(*) as c FROM bug_analyses WHERE pr_url IS NOT NULL"
+        ) as cur:
+            prs_created = (await cur.fetchone())["c"]
+        async with self._conn.execute(
+            """SELECT id, group_name, repo_name, status, claude_summary, created_at
+               FROM bug_analyses ORDER BY created_at DESC LIMIT 20"""
+        ) as cur:
+            recent = [dict(r) for r in await cur.fetchall()]
+        return {
+            "bugs_done": bugs_done,
+            "groups_active": groups_active,
+            "pending": pending,
+            "prs_created": prs_created,
+            "recent_analyses": recent,
+        }
 
 
 def _row_to_message(row) -> Message:
