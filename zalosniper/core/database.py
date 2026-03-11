@@ -346,6 +346,69 @@ class Database:
         )
         await self._conn.commit()
 
+    # --- Migration ---
+
+    async def migrate_from_yaml(self, yaml_path: str) -> None:
+        """One-time migration: import config.yaml into DB. Safe to call multiple times."""
+        import yaml as _yaml
+        import json as _json
+        # Check if already migrated
+        groups = await self.get_all_groups()
+        if groups:
+            return  # already has data — skip
+
+        try:
+            with open(yaml_path) as f:
+                raw = _yaml.safe_load(f)
+        except FileNotFoundError:
+            return  # fresh install — no yaml to migrate
+
+        # Migrate settings
+        settings = {}
+        tg = raw.get("telegram", {})
+        if tg.get("bot_token"):
+            settings["telegram_bot_token"] = tg["bot_token"]
+        if tg.get("approved_user_ids"):
+            settings["approved_user_ids"] = _json.dumps(tg["approved_user_ids"])
+
+        zalo = raw.get("zalo", {})
+        if zalo.get("session_dir"):
+            settings["zalo_session_dir"] = zalo["session_dir"]
+        settings["zalo_poll_interval"] = str(zalo.get("poll_interval_seconds", 30))
+
+        gh = raw.get("github", {})
+        if gh.get("token"):
+            settings["github_token"] = gh["token"]
+        settings["github_pr_enabled"] = "1" if gh.get("pr_enabled", True) else "0"
+        settings["dry_run"] = "1" if raw.get("dry_run", False) else "0"
+
+        ai = raw.get("ai", {})
+        if ai.get("provider"):
+            settings["ai_provider"] = ai["provider"]
+        if ai.get("model"):
+            settings["ai_model"] = ai["model"]
+        if ai.get("base_url"):
+            settings["ai_base_url"] = ai["base_url"]
+
+        await self.set_many_settings(settings)
+
+        # Migrate groups
+        for group_name, g in raw.get("groups", {}).items():
+            gid = await self.create_group(group_name, g["telegram_chat_id"])
+            for r in g.get("repos", []):
+                await self.add_group_repo(
+                    gid, r["owner"], r["name"],
+                    r.get("branch", "main"), r.get("description", "")
+                )
+            op = g.get("openproject", {})
+            if op:
+                await self.upsert_group_openproject(
+                    gid,
+                    op.get("url", ""),
+                    op.get("api_key", ""),
+                    str(op.get("project_id", "")),
+                )
+
     # --- Dashboard stats ---
 
     async def get_dashboard_stats(self) -> dict:

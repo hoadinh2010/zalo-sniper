@@ -58,7 +58,7 @@ def test_group_config(config_file):
     assert group.telegram_chat_id == -100123
     assert len(group.repos) == 1
     assert group.repos[0].name == "repo1"
-    assert group.openproject.project_id == 1
+    assert group.openproject.project_id == "1"
 
 
 def test_get_group_by_name_not_found(config_file):
@@ -72,3 +72,59 @@ def test_missing_required_key_raises(tmp_path):
     path.write_text(yaml.dump(bad))
     with pytest.raises(ValueError):
         ConfigManager(str(path))
+
+
+# --- DB-backed tests ---
+
+import json
+from zalosniper.core.database import Database
+
+
+@pytest.mark.asyncio
+async def test_from_db_loads_settings(tmp_path):
+    db = Database(str(tmp_path / "test.db"))
+    await db.init()
+    await db.set_many_settings({
+        "telegram_bot_token": "bot-token-123",
+        "ai_provider": "gemini",
+        "ai_model": "gemini-2.0-flash",
+        "dry_run": "0",
+        "github_pr_enabled": "1",
+        "zalo_session_dir": "./zalo_session",
+        "zalo_poll_interval": "30",
+        "github_token": "gh-token",
+        "approved_user_ids": "[111, 222]",
+    })
+    config = await ConfigManager.from_db(db)
+    assert config.telegram_bot_token == "bot-token-123"
+    assert config.ai.provider == "gemini"
+    assert config.dry_run is False
+    assert config.approved_user_ids == [111, 222]
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_from_db_loads_groups(tmp_path):
+    db = Database(str(tmp_path / "test.db"))
+    await db.init()
+    gid = await db.create_group("support-bugs", -1001234567)
+    await db.add_group_repo(gid, "org", "backend", "main", "Backend API")
+    await db.upsert_group_openproject(gid, "https://op.example.com", "key", "proj-1")
+    config = await ConfigManager.from_db(db)
+    assert "support-bugs" in config.groups
+    group = config.get_group("support-bugs")
+    assert group.telegram_chat_id == -1001234567
+    assert len(group.repos) == 1
+    assert group.repos[0].name == "backend"
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_from_db_disabled_group_excluded(tmp_path):
+    db = Database(str(tmp_path / "test.db"))
+    await db.init()
+    gid = await db.create_group("disabled-group", -100)
+    await db.update_group(gid, enabled=0)
+    config = await ConfigManager.from_db(db)
+    assert "disabled-group" not in config.groups
+    await db.close()
