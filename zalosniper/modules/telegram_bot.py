@@ -18,15 +18,18 @@ def is_authorized(user_id: int, allowed: List[int]) -> bool:
 
 
 def format_bug_message(analysis: BugAnalysis) -> str:
-    return (
-        f"🐛 *Bug phát hiện từ Group: {analysis.group_name}*\n\n"
-        f"*Repo:* `{analysis.repo_owner}/{analysis.repo_name}`\n"
-        f"*Tóm tắt:* {analysis.claude_summary or 'N/A'}\n\n"
-        f"*Root cause:* {analysis.root_cause or 'N/A'}\n\n"
-        f"*Đề xuất fix:* {analysis.proposed_fix or 'N/A'}\n\n"
-        f"_Bug ID: {analysis.id}_\n\n"
-        f"✅ Approve / ❌ Reject / 📋 Task Only"
-    )
+    lines = [
+        f"🐛 *Bug phát hiện từ Group: {analysis.group_name}*",
+        "",
+        f"*Repo:* `{analysis.repo_owner}/{analysis.repo_name}`",
+        f"*Tóm tắt:* {analysis.claude_summary or 'N/A'}",
+    ]
+    if analysis.root_cause:
+        lines += ["", f"*Root cause:* {analysis.root_cause}"]
+    if analysis.proposed_fix:
+        lines += ["", f"*Đề xuất fix:* {analysis.proposed_fix}"]
+    lines += ["", f"_Bug ID: {analysis.id}_"]
+    return "\n".join(lines)
 
 
 class TelegramBot:
@@ -56,6 +59,9 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("summary", self._cmd_summary))
         self._app.add_handler(CommandHandler("ask", self._cmd_ask))
         self._app.add_handler(CommandHandler("history", self._cmd_history))
+        self._app.add_handler(CommandHandler("enable", self._cmd_enable))
+        self._app.add_handler(CommandHandler("disable", self._cmd_disable))
+        self._app.add_handler(CommandHandler("dashboard", self._cmd_dashboard))
         self._app.add_handler(CallbackQueryHandler(self._handle_callback))
 
     async def start(self) -> None:
@@ -195,6 +201,59 @@ class TelegramBot:
         await update.message.reply_text("⏳ Đang tìm kiếm...")
         answer = await self._ai.answer_question(messages, question)
         await update.message.reply_text(answer)
+
+    async def _cmd_enable(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not is_authorized(update.effective_user.id, self._approved_user_ids):
+            return
+        if not context.args:
+            await update.message.reply_text("Usage: /enable <group_name>")
+            return
+        group_name = " ".join(context.args)
+        if not self._db:
+            await update.message.reply_text("Database not configured.")
+            return
+        groups = await self._db.get_all_groups()
+        group = next((g for g in groups if g["group_name"] == group_name), None)
+        if not group:
+            await update.message.reply_text(f"Không tìm thấy group `{group_name}`.", parse_mode="Markdown")
+            return
+        await self._db.update_group(group["id"], enabled=1)
+        if self._config and hasattr(self._config, "reload_groups"):
+            await self._config.reload_groups()
+        await update.message.reply_text(f"✅ Group `{group_name}` đã được bật.", parse_mode="Markdown")
+
+    async def _cmd_disable(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not is_authorized(update.effective_user.id, self._approved_user_ids):
+            return
+        if not context.args:
+            await update.message.reply_text("Usage: /disable <group_name>")
+            return
+        group_name = " ".join(context.args)
+        if not self._db:
+            await update.message.reply_text("Database not configured.")
+            return
+        groups = await self._db.get_all_groups()
+        group = next((g for g in groups if g["group_name"] == group_name), None)
+        if not group:
+            await update.message.reply_text(f"Không tìm thấy group `{group_name}`.", parse_mode="Markdown")
+            return
+        await self._db.update_group(group["id"], enabled=0)
+        if self._config and hasattr(self._config, "reload_groups"):
+            await self._config.reload_groups()
+        await update.message.reply_text(f"⏸ Group `{group_name}` đã bị tắt.", parse_mode="Markdown")
+
+    async def _cmd_dashboard(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not is_authorized(update.effective_user.id, self._approved_user_ids):
+            return
+        port = 8080
+        if self._config and hasattr(self._config, "dashboard_port"):
+            port = self._config.dashboard_port
+        await update.message.reply_text(
+            f"🌐 *ZaloSniper Dashboard*\n"
+            f"URL: `http://localhost:{port}`\n"
+            f"_Mở trong trình duyệt trên máy đang chạy bot._",
+            parse_mode="Markdown"
+        )
 
     async def _cmd_history(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._db:
