@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% block title %}Group Mapping{% endblock %}
+{% block content %}
+<div id="mapping-container"></div>
+{% endblock %}
+{% block scripts %}
+<script>
+async function loadMapping() {
+  const groups = await GET('/api/groups') || [];
+  const container = document.getElementById('mapping-container');
+  if (!groups.length) {
+    container.innerHTML = '<p style="color:var(--text-muted)">Chưa có group nào. <a href="/groups" style="color:var(--primary)">Thêm group</a> trước.</p>';
+    return;
+  }
+  const html = await Promise.all(groups.map(async g => {
+    const repos = await GET(`/api/groups/${g.id}/repos`) || [];
+    const op = await GET(`/api/groups/${g.id}/openproject`) || {};
+    return `
+      <div class="card" style="margin-bottom:20px">
+        <div class="card-header">
+          <span class="card-title"><span class="group-tag">${g.group_name}</span> — GitHub Repos</span>
+          <button class="btn btn-primary btn-sm" onclick="openAddRepo(${g.id})">+ Thêm repo</button>
+        </div>
+        <table>
+          <thead><tr><th>Owner/Repo</th><th>Branch</th><th>Mô tả</th><th></th></tr></thead>
+          <tbody id="repos-${g.id}">
+            ${repos.length ? repos.map(r => `
+              <tr>
+                <td><code>${r.owner}/${r.repo_name}</code></td>
+                <td>${r.branch}</td>
+                <td style="color:var(--text-muted)">${r.description || '—'}</td>
+                <td><button class="action-btn" onclick="deleteRepo(${g.id},${r.id},'${r.repo_name}')">🗑</button></td>
+              </tr>`).join('') : '<tr><td colspan="4" style="color:var(--text-muted)">Chưa có repo</td></tr>'}
+          </tbody>
+        </table>
+        <div class="card-header" style="border-top:1px solid var(--border);border-bottom:none;margin-top:0">
+          <span class="card-title">OpenProject</span>
+        </div>
+        <div style="padding:20px;display:grid;gap:12px" id="op-${g.id}">
+          <div class="form-group">
+            <label class="form-label">URL</label>
+            <input type="text" class="form-control" id="op-url-${g.id}" value="${op.op_url||''}" placeholder="https://openproject.example.com">
+          </div>
+          <div class="form-group">
+            <label class="form-label">API Key</label>
+            <input type="password" class="form-control" id="op-key-${g.id}" value="${op.op_api_key||''}" placeholder="••••">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Project ID / Slug</label>
+            <input type="text" class="form-control" id="op-proj-${g.id}" value="${op.op_project_id||''}" placeholder="my-project">
+          </div>
+          <button class="btn btn-primary btn-sm" onclick="saveOP(${g.id})">💾 Lưu OpenProject</button>
+        </div>
+      </div>
+      <div class="modal-overlay" id="add-repo-modal-${g.id}">
+        <div class="modal">
+          <div class="modal-title">Thêm GitHub Repo cho "${g.group_name}"</div>
+          <div class="form-group"><label class="form-label">Owner</label><input type="text" id="r-owner-${g.id}" class="form-control" placeholder="myorg"></div>
+          <div class="form-group"><label class="form-label">Repo Name</label><input type="text" id="r-name-${g.id}" class="form-control" placeholder="backend"></div>
+          <div class="form-group"><label class="form-label">Branch</label><input type="text" id="r-branch-${g.id}" class="form-control" placeholder="main" value="main"></div>
+          <div class="form-group"><label class="form-label">Mô tả</label><input type="text" id="r-desc-${g.id}" class="form-control" placeholder="Backend API"></div>
+          <div class="modal-footer">
+            <button class="btn btn-ghost" onclick="document.getElementById('add-repo-modal-${g.id}').classList.remove('open')">Hủy</button>
+            <button class="btn btn-primary" onclick="addRepo(${g.id})">Thêm</button>
+          </div>
+        </div>
+      </div>`;
+  }));
+  container.innerHTML = html.join('');
+}
+
+function openAddRepo(gid) { document.getElementById(`add-repo-modal-${gid}`).classList.add('open'); }
+
+async function addRepo(gid) {
+  const owner = document.getElementById(`r-owner-${gid}`).value.trim();
+  const name = document.getElementById(`r-name-${gid}`).value.trim();
+  const branch = document.getElementById(`r-branch-${gid}`).value.trim() || 'main';
+  const desc = document.getElementById(`r-desc-${gid}`).value.trim();
+  if (!owner || !name) { toast('Owner và Repo Name là bắt buộc', 'error'); return; }
+  const resp = await POST(`/api/groups/${gid}/repos`, {owner, repo_name: name, branch, description: desc});
+  if (resp?.id) { toast('Đã thêm repo!'); document.getElementById(`add-repo-modal-${gid}`).classList.remove('open'); loadMapping(); }
+  else toast('Lỗi khi thêm repo', 'error');
+}
+
+async function deleteRepo(gid, rid, name) {
+  if (!confirm_action(`Xóa repo "${name}"?`)) return;
+  const resp = await DELETE(`/api/groups/${gid}/repos/${rid}`);
+  if (resp?.ok) { toast(`Đã xóa repo "${name}"`); loadMapping(); }
+}
+
+async function saveOP(gid) {
+  const body = {
+    op_url: document.getElementById(`op-url-${gid}`).value,
+    op_api_key: document.getElementById(`op-key-${gid}`).value,
+    op_project_id: document.getElementById(`op-proj-${gid}`).value,
+  };
+  const resp = await PUT(`/api/groups/${gid}/openproject`, body);
+  if (resp?.ok) toast('Đã lưu OpenProject!');
+  else toast('Lỗi khi lưu', 'error');
+}
+
+document.addEventListener('DOMContentLoaded', loadMapping);
+</script>
+{% endblock %}

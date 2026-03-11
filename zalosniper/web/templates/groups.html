@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}Zalo Groups{% endblock %}
+{% block content %}
+<div class="card">
+  <div class="card-header">
+    <span class="card-title">Zalo Groups</span>
+    <button class="btn btn-primary btn-sm" onclick="openAddModal()">+ Thêm group</button>
+  </div>
+  <table>
+    <thead><tr><th>Group</th><th>Telegram Chat ID</th><th>Bật/Tắt</th><th></th></tr></thead>
+    <tbody id="groups-tbody"><tr><td colspan="4" style="text-align:center;color:var(--text-muted)">Đang tải...</td></tr></tbody>
+  </table>
+</div>
+
+<div class="modal-overlay" id="add-modal">
+  <div class="modal">
+    <div class="modal-title">Thêm Zalo Group</div>
+    <div class="form-group">
+      <label class="form-label">Tên Group (chính xác như trên Zalo)</label>
+      <input type="text" id="new-group-name" class="form-control" placeholder="support-bugs">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Telegram Chat ID</label>
+      <input type="number" id="new-chat-id" class="form-control" placeholder="-1001234567">
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal()">Hủy</button>
+      <button class="btn btn-primary" onclick="addGroup()">Thêm</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+let groups = [];
+
+async function loadGroups() {
+  groups = await GET('/api/groups') || [];
+  const tbody = document.getElementById('groups-tbody');
+  if (!groups.length) {
+    tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--text-muted)">Chưa có group nào</td></tr>';
+    return;
+  }
+  tbody.innerHTML = groups.map(g => `
+    <tr id="row-${g.id}">
+      <td><strong>${g.group_name}</strong></td>
+      <td style="color:var(--text-muted);font-family:monospace">${g.telegram_chat_id}</td>
+      <td><button class="toggle ${g.enabled ? 'on' : ''}" onclick="toggleGroup(${g.id},this)"></button></td>
+      <td>
+        <button class="action-btn" onclick="deleteGroup(${g.id},'${g.group_name}')">🗑 Xóa</button>
+      </td>
+    </tr>`).join('');
+}
+
+async function toggleGroup(id, btn) {
+  const newEnabled = btn.classList.contains('on') ? 0 : 1;
+  const resp = await PATCH(`/api/groups/${id}`, {enabled: newEnabled});
+  if (resp?.ok) btn.classList.toggle('on', newEnabled === 1);
+  else toast('Lỗi khi cập nhật', 'error');
+}
+
+async function deleteGroup(id, name) {
+  if (!confirm_action(`Xóa group "${name}"? Thao tác này không thể hoàn tác.`)) return;
+  const resp = await DELETE(`/api/groups/${id}`);
+  if (resp?.ok) { toast(`Đã xóa group "${name}"`); loadGroups(); }
+  else toast('Lỗi khi xóa group', 'error');
+}
+
+function openAddModal() { document.getElementById('add-modal').classList.add('open'); }
+function closeModal() { document.getElementById('add-modal').classList.remove('open'); }
+
+async function addGroup() {
+  const name = document.getElementById('new-group-name').value.trim();
+  const chatId = parseInt(document.getElementById('new-chat-id').value);
+  if (!name || !chatId) { toast('Vui lòng nhập đầy đủ thông tin', 'error'); return; }
+  const resp = await POST('/api/groups', {group_name: name, telegram_chat_id: chatId});
+  if (resp?.id) { toast(`Đã thêm group "${name}"`); closeModal(); loadGroups(); }
+  else toast('Lỗi khi thêm group', 'error');
+}
+
+document.addEventListener('DOMContentLoaded', loadGroups);
+</script>
+{% endblock %}

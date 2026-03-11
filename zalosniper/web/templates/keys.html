@@ -1,0 +1,153 @@
+{% extends "base.html" %}
+{% block title %}API Keys & Settings{% endblock %}
+{% block content %}
+<div class="card">
+  <div class="card-header">
+    <span class="card-title">API Keys</span>
+    <button class="btn btn-primary btn-sm" onclick="saveKeys()">💾 Lưu</button>
+  </div>
+  <div style="padding:24px;display:grid;gap:20px">
+    <div id="save-alert"></div>
+    <div class="form-group">
+      <label class="form-label">Gemini API Key</label>
+      <div class="input-group">
+        <input type="password" id="gemini_api_key" class="form-control" placeholder="AIza...">
+        <button class="btn btn-ghost btn-sm" onclick="toggleShow('gemini_api_key',this)">👁</button>
+      </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">z.ai API Key</label>
+      <div class="input-group">
+        <input type="password" id="zai_api_key" class="form-control" placeholder="****...">
+        <button class="btn btn-ghost btn-sm" onclick="toggleShow('zai_api_key',this)">👁</button>
+      </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">GitHub Token</label>
+      <div class="input-group">
+        <input type="password" id="github_token" class="form-control" placeholder="ghp_...">
+        <button class="btn btn-ghost btn-sm" onclick="toggleShow('github_token',this)">👁</button>
+      </div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Telegram Bot Token</label>
+      <div class="input-group">
+        <input type="password" id="telegram_bot_token" class="form-control" placeholder="123456:ABC...">
+        <button class="btn btn-ghost btn-sm" onclick="toggleShow('telegram_bot_token',this)">👁</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header"><span class="card-title">AI Settings</span></div>
+  <div style="padding:24px;display:grid;gap:16px">
+    <div class="form-group">
+      <label class="form-label">AI Provider</label>
+      <select id="ai_provider" class="form-control">
+        <option value="gemini">Gemini</option>
+        <option value="zai">z.ai (GLM)</option>
+        <option value="openai_compatible">OpenAI Compatible</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Model</label>
+      <input type="text" id="ai_model" class="form-control" placeholder="gemini-2.0-flash">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Base URL (chỉ dùng cho OpenAI Compatible)</label>
+      <input type="text" id="ai_base_url" class="form-control" placeholder="https://api.example.com/v1">
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header"><span class="card-title">Bot Settings</span></div>
+  <div class="setting-row">
+    <div><div class="setting-label">GitHub PR tự động</div><div class="setting-value">Tự động tạo PR khi approve bug</div></div>
+    <button class="toggle" id="toggle-pr" onclick="toggleSetting('github_pr_enabled',this)"></button>
+  </div>
+  <div class="setting-row">
+    <div><div class="setting-label">Dry Run Mode</div><div class="setting-value">Không thực sự tạo PR hay commit</div></div>
+    <button class="toggle" id="toggle-dry" onclick="toggleSetting('dry_run',this)"></button>
+  </div>
+  <div class="setting-row">
+    <div><div class="setting-label">Poll Interval (giây)</div></div>
+    <input type="number" id="zalo_poll_interval" class="form-control" style="width:100px" min="10" max="300">
+  </div>
+  <div class="setting-row">
+    <div><div class="setting-label">Dashboard Port</div></div>
+    <input type="number" id="dashboard_port" class="form-control" style="width:100px" min="1024" max="65535">
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header"><span class="card-title">Đổi mật khẩu Dashboard</span></div>
+  <div style="padding:24px;display:grid;gap:16px">
+    <div class="form-group">
+      <label class="form-label">Mật khẩu mới</label>
+      <input type="password" id="new_password" class="form-control">
+    </div>
+    <button class="btn btn-primary btn-sm" onclick="changePassword()">Đổi mật khẩu</button>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+const SECRET_KEYS = ['gemini_api_key','zai_api_key','github_token','telegram_bot_token'];
+
+function toggleShow(id, btn) {
+  const inp = document.getElementById(id);
+  if (inp.type === 'password') { inp.type = 'text'; btn.textContent = '🙈'; }
+  else { inp.type = 'password'; btn.textContent = '👁'; }
+}
+
+async function loadSettings() {
+  const data = await GET('/api/settings?reveal=0');
+  if (!data) return;
+  for (const key of SECRET_KEYS) {
+    const el = document.getElementById(key);
+    if (el && data[key]) el.placeholder = data[key];
+  }
+  ['ai_provider','ai_model','ai_base_url','zalo_poll_interval','dashboard_port'].forEach(k => {
+    const el = document.getElementById(k);
+    if (el && data[k] !== undefined) el.value = data[k];
+  });
+  const setToggle = (id, val) => {
+    const btn = document.getElementById(id);
+    if (btn) btn.classList.toggle('on', val === '1');
+  };
+  setToggle('toggle-pr', data.github_pr_enabled || '1');
+  setToggle('toggle-dry', data.dry_run || '0');
+}
+
+async function toggleSetting(key, btn) {
+  const newVal = btn.classList.contains('on') ? '0' : '1';
+  await POST('/api/settings', {[key]: newVal});
+  btn.classList.toggle('on');
+}
+
+async function saveKeys() {
+  const body = {};
+  for (const key of SECRET_KEYS) {
+    const val = document.getElementById(key).value;
+    if (val && !val.startsWith('****')) body[key] = val;
+  }
+  ['ai_provider','ai_model','ai_base_url','zalo_poll_interval','dashboard_port'].forEach(k => {
+    const val = document.getElementById(k).value;
+    if (val) body[k] = val;
+  });
+  const resp = await POST('/api/settings', body);
+  if (resp) toast('Đã lưu cài đặt!');
+}
+
+async function changePassword() {
+  const pw = document.getElementById('new_password').value;
+  if (!pw || pw.length < 6) { toast('Mật khẩu phải ít nhất 6 ký tự', 'error'); return; }
+  const resp = await POST('/api/auth/change-password', {password: pw});
+  if (resp) { toast('Đã đổi mật khẩu!'); document.getElementById('new_password').value = ''; }
+}
+
+document.addEventListener('DOMContentLoaded', loadSettings);
+</script>
+{% endblock %}

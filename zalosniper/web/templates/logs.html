@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Nhật ký{% endblock %}
+{% block content %}
+<div class="card">
+  <div class="card-header">
+    <span class="card-title">Log gần đây</span>
+    <div style="display:flex;gap:8px;align-items:center">
+      <select id="level-filter" class="form-control" style="width:130px" onchange="loadLogs()">
+        <option value="">Tất cả</option>
+        <option value="INFO">INFO</option>
+        <option value="WARNING">WARNING</option>
+        <option value="ERROR">ERROR</option>
+      </select>
+      <button class="btn btn-ghost btn-sm" onclick="loadLogs()">🔄</button>
+    </div>
+  </div>
+  <div style="padding:16px;font-family:monospace;font-size:12px;max-height:600px;overflow-y:auto" id="log-viewer">
+    <div style="color:var(--text-muted)">Đang tải...</div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+async function loadLogs() {
+  const level = document.getElementById('level-filter').value;
+  const url = level ? `/api/logs?level=${level}` : '/api/logs';
+  const lines = await GET(url) || [];
+  const viewer = document.getElementById('log-viewer');
+  if (!lines.length) { viewer.innerHTML = '<div style="color:var(--text-muted)">Không có log</div>'; return; }
+  viewer.innerHTML = lines.map(l =>
+    `<div class="log-line log-${l.level}">${l.message}</div>`
+  ).join('');
+  viewer.scrollTop = viewer.scrollHeight;
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  loadLogs();
+  setInterval(loadLogs, 10000); // auto-refresh every 10s
+});
+</script>
+{% endblock %}
