@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="vi" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ZaloSniper — Đăng nhập</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+  body { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+  .login-box { background: var(--surface); border: 1px solid var(--border); border-radius: 16px;
+               padding: 40px; width: 360px; }
+  .login-logo { text-align: center; margin-bottom: 32px; }
+  .login-logo .brand-icon { width: 56px; height: 56px; font-size: 28px; margin: 0 auto 12px; border-radius: 14px;
+                             background: linear-gradient(135deg,#6366f1,#8b5cf6); display: flex;
+                             align-items: center; justify-content: center; }
+  .login-logo h1 { font-size: 22px; font-weight: 700; }
+  .login-logo p { color: var(--text-muted); font-size: 13px; margin-top: 4px; }
+  #error-msg { display: none; }
+</style>
+</head>
+<body>
+<div class="login-box">
+  <div class="login-logo">
+    <div class="brand-icon">⚡</div>
+    <h1>ZaloSniper</h1>
+    <p>Nhập mật khẩu để tiếp tục</p>
+  </div>
+  <div id="error-msg" class="alert alert-error">Mật khẩu không đúng.</div>
+  <div class="form-group">
+    <label class="form-label">Mật khẩu</label>
+    <input type="password" id="password" class="form-control" placeholder="••••••••"
+           onkeydown="if(event.key==='Enter') doLogin()">
+  </div>
+  <button class="btn btn-primary" style="width:100%" onclick="doLogin()">Đăng nhập</button>
+</div>
+<script>
+async function doLogin() {
+  const pw = document.getElementById('password').value;
+  const resp = await fetch('/api/auth/login', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({password: pw})
+  });
+  if (resp.ok) {
+    window.location = '/dashboard';
+  } else {
+    document.getElementById('error-msg').style.display = 'block';
+  }
+}
+</script>
+<script src="/static/app.js"></script>
+</body>
+</html>

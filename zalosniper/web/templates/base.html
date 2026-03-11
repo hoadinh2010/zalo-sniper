@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="vi" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ZaloSniper Dashboard</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="sidebar-brand">
+      <div class="brand-icon">⚡</div>
+      <div>
+        <div class="brand-name">ZaloSniper</div>
+        <div class="brand-version">v1.0.0</div>
+      </div>
+    </div>
+    <nav class="nav">
+      <div class="nav-label">Tổng quan</div>
+      <a href="/dashboard" class="nav-item {% if page == 'dashboard' %}active{% endif %}">
+        <span class="icon">📊</span> Dashboard
+      </a>
+      <div class="nav-label">Cấu hình</div>
+      <a href="/keys" class="nav-item {% if page == 'keys' %}active{% endif %}">
+        <span class="icon">🔑</span> API Keys
+      </a>
+      <a href="/groups" class="nav-item {% if page == 'groups' %}active{% endif %}">
+        <span class="icon">📱</span> Zalo Groups
+      </a>
+      <a href="/mapping" class="nav-item {% if page == 'mapping' %}active{% endif %}">
+        <span class="icon">🔗</span> Group Mapping
+      </a>
+      <div class="nav-label">Hệ thống</div>
+      <a href="/logs" class="nav-item {% if page == 'logs' %}active{% endif %}">
+        <span class="icon">📜</span> Nhật ký
+      </a>
+    </nav>
+    <div class="sidebar-footer">
+      <div class="avatar">A</div>
+      <div>
+        <div class="user-name">Admin</div>
+        <div class="user-role">Quản trị viên</div>
+      </div>
+      <button class="theme-btn" id="theme-btn" onclick="toggleTheme()">🌙</button>
+    </div>
+  </aside>
+
+  <div class="main">
+    <header class="topbar">
+      <div class="page-title">{% block title %}Dashboard{% endblock %}</div>
+      <div class="topbar-right" id="status-badges">
+        <span class="badge badge-yellow">Đang tải...</span>
+        <button class="btn btn-ghost btn-sm" onclick="location.reload()">🔄 Làm mới</button>
+        <button class="btn btn-ghost btn-sm" onclick="logout()">Đăng xuất</button>
+      </div>
+    </header>
+    <div class="content">
+      {% block content %}{% endblock %}
+    </div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+<script>
+// Load status badges
+async function loadStatusBadges() {
+  const data = await GET('/api/status');
+  if (!data) return;
+  const badges = document.getElementById('status-badges');
+  const botBadge = data.bot_running
+    ? '<span class="badge badge-green"><span class="dot-pulse"></span> Bot đang chạy</span>'
+    : '<span class="badge badge-red">● Bot dừng</span>';
+  const zaloBadge = data.zalo_running
+    ? '<span class="badge badge-green"><span class="dot-pulse"></span> Zalo online</span>'
+    : '<span class="badge badge-yellow">● Zalo offline</span>';
+  badges.innerHTML = botBadge + zaloBadge +
+    '<button class="btn btn-ghost btn-sm" onclick="location.reload()">🔄 Làm mới</button>' +
+    '<button class="btn btn-ghost btn-sm" onclick="logout()">Đăng xuất</button>';
+}
+document.addEventListener('DOMContentLoaded', loadStatusBadges);
+</script>
+{% block scripts %}{% endblock %}
+</body>
+</html>
