@@ -1,4 +1,6 @@
-anthropic==0.40.0
+google-genai>=1.0.0
+openai>=1.0.0
+python-dotenv>=1.0.0
 playwright==1.49.0
 python-telegram-bot==21.6
 PyGithub==2.5.0
@@ -8,3 +10,7 @@ pyyaml==6.0.2
 pytest==8.3.4
 pytest-asyncio==0.24.0
 pytest-mock==3.14.0
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+jinja2>=3.1.0
+bcrypt>=4.0.0
