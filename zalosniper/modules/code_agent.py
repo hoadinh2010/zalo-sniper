@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import os
-import subprocess
 from pathlib import Path
 from typing import List, Optional
 
@@ -62,9 +61,14 @@ class CodeAgent:
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
             )
 
-        _, stderr = await proc.communicate()
+        try:
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=120.0)
+        except asyncio.TimeoutError:
+            proc.kill()
+            raise RuntimeError(f"git operation timed out for {owner}/{name}")
         if proc.returncode != 0:
-            raise RuntimeError(f"git error: {stderr.decode()}")
+            safe_msg = stderr.decode().replace(github_token, "***")
+            raise RuntimeError(f"git error: {safe_msg}")
         return repo_dir
 
     def read_files_for_context(self, file_paths: List[str], max_tokens_per_file: int = 2000) -> str:
@@ -115,8 +119,14 @@ class CodeAgent:
                 *cmd,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
             )
-            _, stderr = await proc.communicate()
+            try:
+                _, stderr = await asyncio.wait_for(proc.communicate(), timeout=60.0)
+            except asyncio.TimeoutError:
+                proc.kill()
+                logger.error(f"git cmd {cmd[2]} timed out")
+                return False
             if proc.returncode != 0:
-                logger.error(f"git cmd failed {cmd[2]}: {stderr.decode()}")
+                safe_stderr = stderr.decode().replace(github_token, "***")
+                logger.error(f"git cmd failed {cmd[2]}: {safe_stderr}")
                 return False
         return True
