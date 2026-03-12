@@ -55,21 +55,42 @@ async function loadMapping() {
       <div class="modal-overlay" id="add-repo-modal-${g.id}">
         <div class="modal">
           <div class="modal-title">Thêm GitHub Repo cho "${g.group_name}"</div>
-          <div class="form-group">
-            <label class="form-label">Tìm repo từ GitHub</label>
-            <div class="input-group">
-              <input type="text" id="r-search-${g.id}" class="form-control" placeholder="Tìm theo tên repo..." oninput="searchRepos(${g.id})">
-              <button class="btn btn-ghost btn-sm" onclick="searchRepos(${g.id})">🔍</button>
+          <!-- Step 1: GitHub connect (shown if no token) -->
+          <div id="gh-connect-${g.id}" style="display:none">
+            <div style="text-align:center;padding:16px 0">
+              <div style="font-size:40px;margin-bottom:12px">🔗</div>
+              <div style="font-size:14px;font-weight:600;margin-bottom:8px">Kết nối GitHub</div>
+              <div style="font-size:12px;color:var(--text-muted);margin-bottom:16px">
+                Nhập <a href="https://github.com/settings/tokens/new?scopes=repo&description=ZaloSniper" target="_blank" style="color:var(--primary)">Personal Access Token</a> để tìm repo
+              </div>
             </div>
-            <div id="r-results-${g.id}" style="margin-top:8px;max-height:200px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;display:none"></div>
+            <div class="form-group">
+              <label class="form-label">GitHub Token</label>
+              <input type="password" id="gh-token-${g.id}" class="form-control" placeholder="ghp_xxxxxxxxxxxx">
+            </div>
+            <div class="modal-footer">
+              <button class="btn btn-ghost" onclick="document.getElementById('add-repo-modal-${g.id}').classList.remove('open')">Hủy</button>
+              <button class="btn btn-primary" onclick="connectGitHub(${g.id})">🔗 Kết nối</button>
+            </div>
           </div>
-          <div class="form-group"><label class="form-label">Owner</label><input type="text" id="r-owner-${g.id}" class="form-control" placeholder="myorg"></div>
-          <div class="form-group"><label class="form-label">Repo Name</label><input type="text" id="r-name-${g.id}" class="form-control" placeholder="backend"></div>
-          <div class="form-group"><label class="form-label">Branch</label><input type="text" id="r-branch-${g.id}" class="form-control" placeholder="main" value="main"></div>
-          <div class="form-group"><label class="form-label">Mô tả</label><input type="text" id="r-desc-${g.id}" class="form-control" placeholder="Backend API"></div>
-          <div class="modal-footer">
-            <button class="btn btn-ghost" onclick="document.getElementById('add-repo-modal-${g.id}').classList.remove('open')">Hủy</button>
-            <button class="btn btn-primary" onclick="addRepo(${g.id})">Thêm</button>
+          <!-- Step 2: Repo search (shown if token exists) -->
+          <div id="gh-search-${g.id}" style="display:none">
+            <div class="form-group">
+              <label class="form-label">Tìm repo từ GitHub</label>
+              <div class="input-group">
+                <input type="text" id="r-search-${g.id}" class="form-control" placeholder="Tìm theo tên repo..." oninput="searchRepos(${g.id})">
+                <button class="btn btn-ghost btn-sm" onclick="searchRepos(${g.id})">🔍</button>
+              </div>
+              <div id="r-results-${g.id}" style="margin-top:8px;max-height:200px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;display:none"></div>
+            </div>
+            <div class="form-group"><label class="form-label">Owner</label><input type="text" id="r-owner-${g.id}" class="form-control" placeholder="myorg"></div>
+            <div class="form-group"><label class="form-label">Repo Name</label><input type="text" id="r-name-${g.id}" class="form-control" placeholder="backend"></div>
+            <div class="form-group"><label class="form-label">Branch</label><input type="text" id="r-branch-${g.id}" class="form-control" placeholder="main" value="main"></div>
+            <div class="form-group"><label class="form-label">Mô tả</label><input type="text" id="r-desc-${g.id}" class="form-control" placeholder="Backend API"></div>
+            <div class="modal-footer">
+              <button class="btn btn-ghost" onclick="document.getElementById('add-repo-modal-${g.id}').classList.remove('open')">Hủy</button>
+              <button class="btn btn-primary" onclick="addRepo(${g.id})">Thêm</button>
+            </div>
           </div>
         </div>
       </div>`;
@@ -77,14 +98,53 @@ async function loadMapping() {
   container.innerHTML = html.join('');
 }
 
-function openAddRepo(gid) {
-  document.getElementById(`add-repo-modal-${gid}`).classList.add('open');
-  // Pre-load repos list
-  searchRepos(gid);
-}
-
+let _ghConnected = null; // cached GitHub connection status
 let _repoCache = null;
 let _repoSearchTimer = null;
+
+async function checkGitHubConnection() {
+  if (_ghConnected !== null) return _ghConnected;
+  const settings = await GET('/api/settings');
+  // Masked token looks like "****xxxx", unset is empty or absent
+  const token = settings?.github_token || '';
+  _ghConnected = token.length > 0 && token !== '';
+  return _ghConnected;
+}
+
+async function openAddRepo(gid) {
+  document.getElementById(`add-repo-modal-${gid}`).classList.add('open');
+  const connected = await checkGitHubConnection();
+  document.getElementById(`gh-connect-${gid}`).style.display = connected ? 'none' : 'block';
+  document.getElementById(`gh-search-${gid}`).style.display = connected ? 'block' : 'none';
+  if (connected) searchRepos(gid);
+}
+
+async function connectGitHub(gid) {
+  const token = document.getElementById(`gh-token-${gid}`).value.trim();
+  if (!token) { toast('Vui lòng nhập GitHub token', 'error'); return; }
+
+  // Test the token first
+  const testResp = await fetch('/api/github/repos?test_token=' + encodeURIComponent(token), {
+    headers: {'Content-Type': 'application/json'},
+    credentials: 'same-origin'
+  });
+  const testData = await testResp.json();
+  if (testData.error) {
+    toast('Token không hợp lệ: ' + testData.error, 'error');
+    return;
+  }
+
+  // Save token to settings
+  const resp = await POST('/api/settings', { github_token: token });
+  if (!resp?.ok) { toast('Lỗi lưu token', 'error'); return; }
+
+  toast('Đã kết nối GitHub!');
+  _ghConnected = true;
+  _repoCache = testData; // use already-fetched repos
+  document.getElementById(`gh-connect-${gid}`).style.display = 'none';
+  document.getElementById(`gh-search-${gid}`).style.display = 'block';
+  searchRepos(gid);
+}
 
 async function searchRepos(gid) {
   clearTimeout(_repoSearchTimer);
@@ -98,6 +158,12 @@ async function searchRepos(gid) {
       const data = await GET('/api/github/repos');
       if (!data || data.error) {
         resultsEl.innerHTML = `<div style="padding:10px;color:var(--red)">${data?.error || 'Lỗi tải repo'}</div>`;
+        // If token is invalid, show connect form
+        if (data?.error?.includes('401') || data?.error?.includes('token')) {
+          _ghConnected = false;
+          document.getElementById(`gh-connect-${gid}`).style.display = 'block';
+          document.getElementById(`gh-search-${gid}`).style.display = 'none';
+        }
         return;
       }
       _repoCache = data;

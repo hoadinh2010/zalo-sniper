@@ -182,11 +182,15 @@ def create_api_router() -> APIRouter:
         return {"ok": True}
 
     @router.get("/github/repos")
-    async def list_github_repos(request: Request, q: str = ""):
+    async def list_github_repos(request: Request, q: str = "", test_token: str = ""):
         if not _require_auth(request):
             return JSONResponse({"error": "Unauthorized"}, status_code=401)
-        settings = await request.app.state.db.get_all_settings()
-        token = settings.get("github_token", "")
+        # Allow testing a token before saving it
+        if test_token:
+            token = test_token
+        else:
+            settings = await request.app.state.db.get_all_settings()
+            token = settings.get("github_token", "")
         if not token:
             return JSONResponse({"error": "GitHub token not configured"}, status_code=400)
         import aiohttp
