@@ -38,6 +38,12 @@ def create_app(db, auth: AuthManager, password_hash: str, bot_state: dict) -> Fa
     app.include_router(create_pages_router())
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
+    # Serve downloaded images
+    import os
+    images_dir = os.path.join(os.getcwd(), "data", "images")
+    os.makedirs(images_dir, exist_ok=True)
+    app.mount("/images", StaticFiles(directory=images_dir), name="images")
+
     return app
 
 

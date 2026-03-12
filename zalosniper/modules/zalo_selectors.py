@@ -18,3 +18,4 @@ MESSAGE_FRAME = "[data-component='message-content-view']"  # wrapper holding dat
 MESSAGE_ID_ATTR = "data-qid"                               # unique message ID attribute
 MESSAGE_ME_CLASS = "me"                                    # class added to sent-by-me chat-items
 MESSAGE_DATE_DIVIDER = ".chat-divider"                     # date divider between message groups
+MESSAGE_IMAGE = "[data-component='image-container'] img, .chat-message-img img"  # image in message

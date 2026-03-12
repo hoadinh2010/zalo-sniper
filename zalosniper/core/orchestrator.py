@@ -62,31 +62,97 @@ class Orchestrator:
         code_agent: CodeAgent,
         github: GitHubClient,
         telegram: TelegramBot,
+        bot_state: dict = None,
     ) -> None:
         self._config = config
         self._db = db
         self._bus = bus
         self._ai = ai
+        self._bot_state = bot_state  # shared state — AI can be hot-reloaded
         self._code_agent = code_agent
         self._github = github
         self._telegram = telegram
+        self._debounce_tasks: dict[str, asyncio.Task] = {}  # group_name -> pending task
+        self._ai_lock = asyncio.Lock()  # Global lock: only 1 AI call at a time
+        self._last_ai_call: float = 0   # timestamp of last AI call
+        self._ai_min_interval = 30      # minimum seconds between AI calls
 
         bus.subscribe("NEW_MESSAGE", self._on_new_message)
 
+    @property
+    def ai(self) -> AIAnalyzer:
+        """Get current AI analyzer — may be hot-reloaded from dashboard."""
+        if self._bot_state and "ai" in self._bot_state:
+            return self._bot_state["ai"]
+        return self._ai
+
     async def _on_new_message(self, event: Event) -> None:
+        """Debounce: wait 10s after last message before processing a group.
+
+        This batches multiple rapid messages into a single AI call,
+        reducing rate-limit usage significantly.
+        """
         group_name = event.data["group_name"]
-        new_count = event.data.get("new_count", 0)
         group_config = self._config.get_group(group_name)
         if not group_config:
             return
 
-        messages = await self._db.get_recent_messages(group_name, limit=20, within_hours=1)
+        # Cancel any pending debounce for this group — restart the timer
+        existing = self._debounce_tasks.get(group_name)
+        if existing and not existing.done():
+            existing.cancel()
+
+        self._debounce_tasks[group_name] = asyncio.create_task(
+            self._process_group_debounced(group_name, group_config)
+        )
+
+    async def _rate_limited_ai_call(self, coro):
+        """Execute an AI call with global rate limiting.
+
+        Ensures minimum interval between calls and serializes access.
+        """
+        async with self._ai_lock:
+            import time
+            now = time.monotonic()
+            elapsed = now - self._last_ai_call
+            if elapsed < self._ai_min_interval:
+                wait = self._ai_min_interval - elapsed
+                logger.debug(f"Rate limiter: waiting {wait:.0f}s before AI call")
+                await asyncio.sleep(wait)
+            result = await coro
+            self._last_ai_call = time.monotonic()
+            return result
+
+    async def _upload_message_images(
+        self, op_client, wp_id: int, messages: list
+    ) -> None:
+        """Upload images from messages as attachments to an OP work package."""
+        for m in messages:
+            if m.image_path:
+                try:
+                    await op_client.upload_attachment(wp_id, m.image_path)
+                except Exception as e:
+                    logger.debug(f"Failed to upload image {m.image_path}: {e}")
+
+    async def _process_group_debounced(self, group_name: str, group_config) -> None:
+        """Wait 10s then process all unprocessed messages for the group."""
+        await asyncio.sleep(10)  # debounce window — collect messages
+
+        messages = await self._db.get_unprocessed_messages(group_name, limit=20, within_hours=1)
         if not messages:
             return
 
-        # Single AI call: summarize + classify together (saves rate-limit quota)
+        msg_ids = [m.id for m in messages if m.id]
+
+        # Check if there's an existing open bug (pending or task_only) for this group
+        existing_bug = await self._db.get_recent_open_analysis(group_name, within_hours=2)
+        existing_summary = existing_bug.claude_summary if existing_bug else None
+
+        # Single AI call: triage + decide update-or-new in one shot
         try:
-            triage = await self._ai.triage_messages(messages)
+            triage = await self._rate_limited_ai_call(
+                self.ai.triage_messages(messages, existing_bug_summary=existing_summary)
+            )
         except Exception as e:
             logger.error(f"AI triage_messages failed for group {group_name!r}: {e}")
             await self._telegram.send_message(
@@ -99,9 +165,84 @@ class Orchestrator:
         summary = triage.get("summary", "")
         issues = triage.get("issues", [])
         is_bug = triage.get("type") == "bug_report"
+        action = triage.get("action", "new")
 
+        # Mark all messages as processed so they won't be included in future notifications
+        await self._db.mark_messages_processed(msg_ids)
+
+        # If AI says these messages continue an existing bug → update it
+        if existing_bug and action == "update":
+            updated_summary = summary or existing_bug.claude_summary
+            await self._db.update_bug_analysis_context(
+                existing_bug.id, msg_ids, updated_summary
+            )
+
+            # If OP task exists, update its description too
+            op_update_note = ""
+            if existing_bug.op_work_package_id:
+                try:
+                    op = group_config.openproject
+                    op_client = OpenProjectClient(url=op.url, api_key=op.api_key)
+                    # Build updated description with all linked messages
+                    full_analysis = await self._db.get_bug_analysis(existing_bug.id)
+                    desc_parts = [f"**Tóm tắt:** {updated_summary}"]
+                    if full_analysis and full_analysis.message_ids:
+                        all_msgs = await self._db.get_recent_messages(group_name, limit=100, within_hours=24)
+                        msg_map = {m.id: m for m in all_msgs}
+                        relevant = [msg_map[mid] for mid in full_analysis.message_ids if mid in msg_map]
+                        if relevant:
+                            desc_parts.append("\n**Tin nhắn gốc từ Zalo:**")
+                            for m in relevant:
+                                desc_parts.append(f"- **{m.sender}** ({m.timestamp.strftime('%H:%M')}): {m.content}")
+                    await op_client.update_work_package(
+                        existing_bug.op_work_package_id,
+                        "\n".join(desc_parts),
+                    )
+                    # Upload new images as attachments
+                    await self._upload_message_images(
+                        op_client, existing_bug.op_work_package_id, messages
+                    )
+                    op_update_note = "\n(Da cap nhat OpenProject task)"
+                except Exception as e:
+                    logger.warning(f"Failed to update OP task for Bug #{existing_bug.id}: {e}")
+                    op_update_note = "\n(Khong cap nhat duoc OP task)"
+
+            await self._telegram.send_message(
+                group_config.telegram_chat_id,
+                f"🔄 Bug #{existing_bug.id} cap nhat:\n\n"
+                f"{updated_summary}\n\n"
+                f"(+{len(messages)} tin nhan moi lien quan){op_update_note}",
+            )
+            logger.info(f"Updated existing Bug #{existing_bug.id} with {len(messages)} new messages")
+            return
+
+        if not is_bug:
+            # Non-bug: just send a plain summary, no buttons
+            lines = [
+                f"[{now_str}] Nhom: {group_name} — {len(messages)} tin nhan moi",
+                "",
+                f"Tom tat: {summary}",
+                "(Khong co bug report)",
+            ]
+            await self._telegram.send_message(
+                group_config.telegram_chat_id,
+                "\n".join(lines),
+            )
+            return
+
+        # Bug detected: save analysis first so we have an ID for buttons
+        analysis = BugAnalysis(
+            id=None,
+            message_ids=[m.id for m in messages],
+            group_name=group_name,
+            claude_summary=summary,
+        )
+        analysis_id = await self._db.insert_bug_analysis(analysis)
+        analysis.id = analysis_id
+
+        # Build single combined message: summary + issues + buttons
         lines = [
-            f"[{now_str}] Nhom: {group_name} — {new_count} tin nhan moi",
+            f"[{now_str}] Nhom: {group_name} — {len(messages)} tin nhan moi",
             "",
             f"Tom tat: {summary}",
         ]
@@ -112,31 +253,13 @@ class Orchestrator:
                 lines.append(f"\n#{i}. {issue.get('title', '')}")
                 lines.append(f"   Mo ta: {issue.get('description', '')}")
                 lines.append(f"   Huong xu ly: {issue.get('proposed_solution', '')}")
-        elif not is_bug:
-            lines.append("(Khong co bug report)")
+        lines.append(f"\nBug ID: {analysis_id}")
 
-        await self._telegram.send_message(
-            group_config.telegram_chat_id,
-            "\n".join(lines),
-        )
-
-        if not is_bug:
-            return
-
-        # Save analysis record without repo — repo selection happens when user presses "Xử lý task"
-        analysis = BugAnalysis(
-            id=None,
-            message_ids=[m.id for m in messages],
-            group_name=group_name,
-            claude_summary=summary,
-        )
-        analysis_id = await self._db.insert_bug_analysis(analysis)
-        analysis.id = analysis_id
-
-        # Send Telegram notification with Approve / Reject buttons
-        # Code analysis only happens AFTER user approves
-        msg_id = await self._telegram.send_bug_notification(
-            chat_id=group_config.telegram_chat_id, analysis=analysis
+        # Send ONE message with summary + action buttons
+        msg_id = await self._telegram.send_bug_notification_with_text(
+            chat_id=group_config.telegram_chat_id,
+            text="\n".join(lines),
+            analysis_id=analysis_id,
         )
         await self._db.update_bug_analysis_status(analysis_id, BugStatus.PENDING, telegram_message_id=msg_id)
 
@@ -199,7 +322,7 @@ class Orchestrator:
                 analysis.group_name, limit=20, within_hours=6
             )
             root_analysis = await _call_with_retry(
-                lambda: self._ai.analyze_root_cause(context_messages, code_context),
+                lambda: self.ai.analyze_root_cause(context_messages, code_context),
                 self._db, analysis_id,
                 alert_fn=lambda msg: asyncio.create_task(
                     self._telegram.send_message(group_config.telegram_chat_id, msg)
@@ -227,15 +350,21 @@ class Orchestrator:
         try:
             op = group_config.openproject
             op_client = OpenProjectClient(url=op.url, api_key=op.api_key)
+            approve_summary = analysis.claude_summary or f"Bug #{analysis_id}"
             op_id, op_url = await op_client.create_work_package(
                 project_id=op.project_id,
-                title=f"Bug: {analysis.claude_summary}",
+                title=f"Bug: {approve_summary}",
                 description=(
-                    f"**Tóm tắt:** {analysis.claude_summary}\n\n"
+                    f"**Tóm tắt:** {approve_summary}\n\n"
                     f"**Root cause:** {root_cause}\n\n"
                     f"**Đề xuất fix:** {proposed_fix}"
                 ),
             )
+            # Upload images from linked messages
+            if op_id and analysis.message_ids:
+                all_msgs = await self._db.get_recent_messages(analysis.group_name, limit=100, within_hours=24)
+                image_msgs = [m for m in all_msgs if m.id in analysis.message_ids and m.image_path]
+                await self._upload_message_images(op_client, op_id, image_msgs)
         except Exception as e:
             logger.error(f"OpenProject create_work_package failed: {e}")
             await self._telegram.send_message(
@@ -245,7 +374,7 @@ class Orchestrator:
 
         # Step 3: Generate patch and create PR (if not dry run)
         try:
-            patch = await self._ai.generate_patch(root_cause, code_context)
+            patch = await self.ai.generate_patch(root_cause, code_context)
             branch_name = f"fix/bug-{analysis_id}"
             patch_ok = await self._code_agent.apply_patch(patch, repo_dir)
             if patch_ok:
@@ -315,11 +444,28 @@ class Orchestrator:
         try:
             op = group_config.openproject
             op_client = OpenProjectClient(url=op.url, api_key=op.api_key)
+            summary = analysis.claude_summary or f"Bug #{analysis_id}"
+            # Build description from linked messages if available
+            desc_parts = [f"**Tóm tắt:** {summary}"]
+            if analysis.message_ids:
+                msgs = await self._db.get_recent_messages(analysis.group_name, limit=50, within_hours=24)
+                msg_map = {m.id: m for m in msgs}
+                relevant = [msg_map[mid] for mid in analysis.message_ids if mid in msg_map]
+                if relevant:
+                    desc_parts.append("\n**Tin nhắn gốc từ Zalo:**")
+                    for m in relevant:
+                        desc_parts.append(f"- **{m.sender}** ({m.timestamp.strftime('%H:%M')}): {m.content}")
             op_id, op_url = await op_client.create_work_package(
                 project_id=op.project_id,
-                title=f"Bug: {analysis.claude_summary}",
-                description=f"**Tóm tắt từ Zalo:** {analysis.claude_summary}",
+                title=f"Bug: {summary}",
+                description="\n".join(desc_parts),
             )
+            # Upload images from linked messages
+            if op_id and analysis.message_ids:
+                image_msgs = [m for m in (msg_map.get(mid) for mid in analysis.message_ids)
+                              if m and m.image_path]
+                await self._upload_message_images(op_client, op_id, image_msgs)
+
             await self._db.update_bug_analysis_status(
                 analysis_id, BugStatus.TASK_ONLY,
                 op_work_package_id=op_id, op_work_package_url=op_url,
@@ -359,7 +505,7 @@ class Orchestrator:
         else:
             try:
                 messages = await self._db.get_recent_messages(analysis.group_name, limit=20, within_hours=6)
-                owner, name, _ = await self._ai.select_repo(messages, repos)
+                owner, name, _ = await self.ai.select_repo(messages, repos)
             except Exception as e:
                 logger.error(f"AI select_repo failed for analysis {analysis_id}: {e}")
                 await self._telegram.send_message(
@@ -397,7 +543,7 @@ class Orchestrator:
         try:
             context_messages = await self._db.get_recent_messages(analysis.group_name, limit=20, within_hours=6)
             root_analysis = await _call_with_retry(
-                lambda: self._ai.analyze_root_cause(context_messages, code_context),
+                lambda: self.ai.analyze_root_cause(context_messages, code_context),
                 self._db, analysis_id,
                 alert_fn=lambda msg: asyncio.create_task(
                     self._telegram.send_message(group_config.telegram_chat_id, msg)
@@ -422,7 +568,7 @@ class Orchestrator:
         # Generate patch and create PR
         pr_url, pr_number = None, None
         try:
-            patch = await self._ai.generate_patch(root_cause, code_context)
+            patch = await self.ai.generate_patch(root_cause, code_context)
             branch_name = f"fix/bug-{analysis_id}"
             patch_ok = await self._code_agent.apply_patch(patch, repo_dir)
             if patch_ok:

@@ -2,7 +2,7 @@
 {% block title %}Lịch sử chat{% endblock %}
 {% block content %}
 <style>
-  .chat-layout { display: grid; grid-template-columns: 280px 1fr; gap: 0; height: calc(100vh - 120px); margin: -28px -32px; min-height: 0; overflow: hidden; }
+  .chat-layout { display: grid; grid-template-columns: 280px 1fr; gap: 0; height: calc(100vh - 60px); margin: -28px -32px; min-height: 0; overflow: hidden; }
 
   /* ── Group list (left panel) ── */
   .chat-sidebar { background: var(--surface); border-right: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; }
@@ -205,7 +205,9 @@ function renderMessages(msgs) {
   let html = '';
   let lastSender = null;
   for (const m of msgs) {
-    const dt = m.timestamp ? m.timestamp.split(' ')[0] : '—';
+    // Use created_at for date grouping (reliable), timestamp for time display (from Zalo)
+    const dateSource = m.created_at || m.timestamp;
+    const dt = dateSource ? dateSource.split(' ')[0] : '—';
     const time = m.timestamp ? m.timestamp.split(' ')[1]?.slice(0,5) : '';
     const isMe = m.sender === 'me';
     const displayName = isMe ? 'Tôi' : m.sender;
@@ -229,7 +231,10 @@ function renderMessages(msgs) {
         </div>
         <div class="msg-col">
           ${showName ? `<div class="msg-sender-name" style="color:${color}">${escHtml(displayName)}</div>` : ''}
-          <div class="msg-bubble ${isMe ? 'me-bubble' : 'other'}">${escHtml(m.content)}</div>
+          <div class="msg-bubble ${isMe ? 'me-bubble' : 'other'}">
+            ${m.image_path ? `<img src="/images/${m.image_path.replace('data/images/','')}" style="max-width:300px;border-radius:8px;margin-bottom:4px;cursor:pointer;display:block" onclick="window.open(this.src)" onerror="this.style.display='none'">` : ''}
+            ${escHtml(m.content)}
+          </div>
           <div class="msg-meta"><span class="msg-time">${time}</span>${processedMark}</div>
         </div>
       </div>`;

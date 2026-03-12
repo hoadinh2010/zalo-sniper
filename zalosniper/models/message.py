@@ -13,3 +13,4 @@ class Message:
     zalo_message_id: Optional[str] = None
     processed: bool = False
     created_at: Optional[datetime] = None
+    image_path: Optional[str] = None

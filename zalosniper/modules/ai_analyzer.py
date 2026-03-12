@@ -64,28 +64,47 @@ class AIAnalyzer:
         except json.JSONDecodeError as exc:
             raise ValueError(f"Invalid JSON in Claude response: {exc}") from exc
 
-    async def triage_messages(self, messages: List[Message]) -> Dict[str, Any]:
+    async def triage_messages(
+        self, messages: List[Message], existing_bug_summary: Optional[str] = None
+    ) -> Dict[str, Any]:
         """Single call: summarize + classify + extract issues with solutions.
 
+        If existing_bug_summary is provided, the AI also decides whether new messages
+        are a continuation of that bug (action=update) or a new topic (action=new).
+
         Returns: {
+            "action": "update" | "new",     # only when existing_bug_summary provided
             "type": "bug_report" | "noise",
-            "summary": str,           # overall Vietnamese summary
+            "summary": str,           # overall Vietnamese summary (updated if action=update)
             "affected_feature": str,
-            "issues": [               # list of distinct problems found
-                {
-                    "title": str,
-                    "description": str,
-                    "proposed_solution": str
-                }
-            ]
+            "issues": [...]
         }
         """
         chat = _messages_to_text(messages)
+
+        existing_context = ""
+        action_schema = ""
+        action_rules = ""
+        if existing_bug_summary:
+            existing_context = (
+                f"\n\nThere is an EXISTING pending bug report for this group:\n"
+                f'"{existing_bug_summary}"\n'
+            )
+            action_schema = '  "action": "update" or "new",\n'
+            action_rules = (
+                '- FIRST decide: are the new messages a CONTINUATION of the existing bug? '
+                'If yes, action="update" and summary should be an UPDATED version combining old + new details. '
+                'If the conversation moved to a completely different topic, action="new".\n'
+                '- When action="update", type must be "bug_report".\n'
+            )
+
         system = (
             "You are a bug triage assistant for a Vietnamese software team. "
-            "Analyze the Zalo group chat messages carefully and respond ONLY with valid JSON (no markdown, no extra text).\n\n"
+            "Analyze the Zalo group chat messages carefully and respond ONLY with valid JSON (no markdown, no extra text)."
+            f"{existing_context}\n\n"
             "JSON schema:\n"
             '{\n'
+            f'{action_schema}'
             '  "type": "bug_report" or "noise",\n'
             '  "summary": "<1-3 sentence Vietnamese summary of what was discussed>",\n'
             '  "affected_feature": "<feature or component name, empty string if noise>",\n'
@@ -98,6 +117,7 @@ class AIAnalyzer:
             '  ]\n'
             '}\n\n'
             'Rules:\n'
+            f'{action_rules}'
             '- If type is "noise", issues must be an empty array [].\n'
             '- Split distinct problems into separate issue objects.\n'
             '- proposed_solution must be actionable (e.g. "Kiểm tra null check ở hàm login()", not "cần xem lại code").\n'
@@ -166,6 +186,41 @@ class AIAnalyzer:
         text = await self._call(system, user)
         result = self._parse_json(text)
         return result.get("patch", "")
+
+    async def check_message_relevance(
+        self, new_messages: List[Message], existing_summary: str
+    ) -> Dict[str, Any]:
+        """Check if new messages are related to an existing bug report.
+
+        Returns: {
+            "related": true/false,
+            "updated_summary": "<updated Vietnamese summary if related>",
+            "reason": "<why related or not>"
+        }
+        """
+        chat = _messages_to_text(new_messages)
+        system = (
+            "You are a bug triage assistant for a Vietnamese software team. "
+            "You have an existing bug report. New messages arrived in the same group chat. "
+            "Determine if these new messages are a CONTINUATION of the same bug/issue discussion, "
+            "or if they are about a completely different topic.\n\n"
+            "Respond ONLY with valid JSON (no markdown, no extra text):\n"
+            '{\n'
+            '  "related": true or false,\n'
+            '  "updated_summary": "<if related: updated Vietnamese summary combining old + new info. if not related: empty string>",\n'
+            '  "reason": "<brief Vietnamese explanation>"\n'
+            '}\n\n'
+            "Rules:\n"
+            "- related=true if the new messages add details, ask follow-up questions, or discuss the same problem.\n"
+            "- related=false if the conversation has clearly moved to a different topic.\n"
+            "- When related=true, updated_summary should be a refined version that includes the new details."
+        )
+        user = (
+            f"Existing bug summary:\n{existing_summary}\n\n"
+            f"New messages:\n{chat}"
+        )
+        text = await self._call(system, user)
+        return self._parse_json(text)
 
     async def summarize_messages(self, messages: List[Message]) -> str:
         """Summarize group messages as bullet points."""

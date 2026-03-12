@@ -53,7 +53,8 @@ function makeToggle(on, onChange) {
 // ── Status pill ──
 function statusPill(status) {
   const map = { done: 'pill-done', pending: 'pill-pending', rejected: 'pill-rejected',
-                error: 'pill-error', approved: 'pill-done', expired: 'pill-rejected' };
+                error: 'pill-error', approved: 'pill-done', expired: 'pill-rejected',
+                task_only: 'pill-pending' };
   return `<span class="pill ${map[status] || 'pill-pending'}">${status.toUpperCase()}</span>`;
 }
 

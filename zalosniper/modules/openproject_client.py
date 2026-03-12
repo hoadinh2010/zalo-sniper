@@ -70,5 +70,73 @@ class OpenProjectClient:
             return None, None
 
 
+    async def upload_attachment(
+        self,
+        work_package_id: int,
+        file_path: str,
+    ) -> Optional[str]:
+        """Upload a file attachment to a work package. Returns the attachment download URL."""
+        import os
+        if not os.path.exists(file_path):
+            logger.warning(f"Attachment file not found: {file_path}")
+            return None
+        filename = os.path.basename(file_path)
+        url = f"{self._base}/api/v3/work_packages/{work_package_id}/attachments"
+        # OP API requires multipart: metadata (JSON) + file
+        headers = {k: v for k, v in self._headers.items() if k != "Content-Type"}
+        try:
+            import aiohttp
+            data = aiohttp.FormData()
+            data.add_field(
+                "metadata",
+                '{"fileName": "' + filename + '"}',
+                content_type="application/json",
+            )
+            data.add_field(
+                "file",
+                open(file_path, "rb"),
+                filename=filename,
+            )
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, data=data, headers=headers) as resp:
+                    if resp.status in (200, 201):
+                        result = await resp.json()
+                        dl_url = result.get("_links", {}).get("downloadLocation", {}).get("href", "")
+                        logger.info(f"Attachment uploaded to WP #{work_package_id}: {filename}")
+                        return dl_url
+                    else:
+                        body = await resp.text()
+                        logger.error(f"OP attachment upload error {resp.status}: {body}")
+                        return None
+        except Exception as e:
+            logger.error(f"OP attachment upload failed: {e}")
+            return None
+
+    async def update_work_package(
+        self,
+        work_package_id: int,
+        description: str,
+    ) -> bool:
+        """Update an existing work package's description."""
+        payload = {
+            "description": {"format": "markdown", "raw": description},
+        }
+        url = f"{self._base}/api/v3/work_packages/{work_package_id}"
+        logger.info(f"Updating work package #{work_package_id}")
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.patch(url, json=payload, headers=self._headers) as resp:
+                    if resp.status in (200, 201):
+                        logger.info(f"Work package #{work_package_id} updated")
+                        return True
+                    else:
+                        body = await resp.text()
+                        logger.error(f"OpenProject update error {resp.status}: {body}")
+                        return False
+        except Exception as e:
+            logger.error(f"OpenProject update failed: {e}")
+            return False
+
+
 def _encode_api_key(api_key: str) -> str:
     return base64.b64encode(f"apikey:{api_key}".encode()).decode()

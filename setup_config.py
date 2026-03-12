@@ -2,6 +2,9 @@
 """Interactive CLI to generate config.yaml for ZaloSniper."""
 import os
 import sys
+import urllib.request
+import urllib.error
+import json
 import yaml
 
 
@@ -72,6 +75,85 @@ def section(title: str) -> None:
     print(f"{'─' * width}")
 
 
+# ─── GitHub repo fetcher ───────────────────────────────────────────────────────
+
+def _github_api(path: str, token: str) -> list | dict | None:
+    url = f"https://api.github.com{path}"
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github+json",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read())
+    except Exception:
+        return None
+
+
+def fetch_repos_for_owner(owner: str, token: str) -> list[dict]:
+    """Try org repos first, fall back to user repos."""
+    data = _github_api(f"/orgs/{owner}/repos?per_page=100&sort=updated", token)
+    if not isinstance(data, list):
+        data = _github_api(f"/users/{owner}/repos?per_page=100&sort=updated", token)
+    if not isinstance(data, list):
+        return []
+    return [{"name": r["name"], "default_branch": r.get("default_branch", "main")} for r in data]
+
+
+def pick_repos(owner: str, token: str) -> list[dict]:
+    """Fetch repos from GitHub and let user pick interactively."""
+    print(f"\n  🔍 Đang tải danh sách repo của '{owner}'...")
+    repos = fetch_repos_for_owner(owner, token)
+    if not repos:
+        print("  ⚠  Không tải được repo. Nhập tay bên dưới.")
+        return [configure_repo_manual(owner)]
+
+    print(f"\n  Tìm thấy {len(repos)} repo:")
+    for i, r in enumerate(repos, 1):
+        print(f"    {i:3}. {r['name']}  [{r['default_branch']}]")
+
+    print()
+    tip("Nhập số thứ tự các repo muốn theo dõi (cách nhau bởi dấu phẩy, ví dụ: 1,3,5)")
+    tip("Hoặc nhấn Enter để nhập tay tên repo.")
+
+    while True:
+        val = input("  Chọn repo: ").strip()
+        if not val:
+            return [configure_repo_manual(owner)]
+        try:
+            indices = [int(x.strip()) for x in val.split(",")]
+            selected = []
+            for idx in indices:
+                if 1 <= idx <= len(repos):
+                    r = repos[idx - 1]
+                    tip(f"Mô tả ngắn cho repo '{r['name']}' (vd: Backend API, để trống OK):")
+                    desc = input(f"    description [{r['name']}]: ").strip()
+                    branch = input(f"    branch [{r['default_branch']}]: ").strip() or r["default_branch"]
+                    selected.append({
+                        "owner": owner,
+                        "name": r["name"],
+                        "branch": branch,
+                        "description": desc or r["name"],
+                    })
+                else:
+                    print(f"  ⚠  Số {idx} không hợp lệ (phải từ 1 đến {len(repos)}).")
+            if selected:
+                return selected
+        except ValueError:
+            print("  ⚠  Nhập số nguyên, ví dụ: 1,3")
+
+
+def configure_repo_manual(default_owner: str = "") -> dict:
+    print()
+    tip("Nhập thông tin repo GitHub:")
+    owner = ask("    owner (tên org hoặc username GitHub)", default=default_owner)
+    name  = ask("    tên repo")
+    branch = ask("    branch chính", default="main")
+    tip("Mô tả giúp AI chọn đúng repo khi 1 group có nhiều repo.")
+    description = ask("    mô tả ngắn (vd: Backend API cho dự án ABC)", required=False)
+    return {"owner": owner, "name": name, "branch": branch, "description": description}
+
+
 # ─── section configurers ──────────────────────────────────────────────────────
 
 def configure_telegram() -> tuple[str, list]:
@@ -114,24 +196,15 @@ def configure_github() -> tuple[str, bool]:
     return github_token, pr_enabled
 
 
-def configure_anthropic() -> str:
-    section("3/5  Claude AI (Anthropic)")
-    tip("Lấy API key tại: https://console.anthropic.com/account/keys")
-    tip("  1. Đăng nhập → API Keys → Create Key.")
-    tip("  2. Copy key (bắt đầu bằng sk-ant-...).")
+def configure_gemini() -> str:
+    section("3/5  Google Gemini AI")
+    tip("Lấy API key miễn phí tại: https://aistudio.google.com/app/apikey")
+    tip("  1. Đăng nhập bằng tài khoản Google.")
+    tip("  2. Nhấn 'Create API key' → chọn project (hoặc tạo mới).")
+    tip("  3. Copy key (bắt đầu bằng AIza...).")
+    tip("Gói miễn phí: 15 req/phút, 1 triệu token/ngày — đủ dùng cho bot.")
     tip("Key sẽ được lưu vào file .env (không lưu vào config.yaml).")
-    return ask("Anthropic API key (sk-ant-...)")
-
-
-def configure_repo() -> dict:
-    print()
-    tip("Nhập thông tin repo GitHub:")
-    owner = ask("    owner (tên org hoặc username GitHub)")
-    name  = ask("    tên repo")
-    branch = ask("    branch chính", default="main")
-    tip("Mô tả giúp AI chọn đúng repo khi 1 group có nhiều repo.")
-    description = ask("    mô tả ngắn (vd: Backend API cho dự án ABC)", required=False)
-    return {"owner": owner, "name": name, "branch": branch, "description": description}
+    return ask("Gemini API key (AIza...)")
 
 
 def configure_openproject() -> dict | None:
@@ -148,16 +221,21 @@ def configure_openproject() -> dict | None:
     op_api_key = ask("  API key")
 
     print()
-    tip("Lấy project_id:")
-    tip("  Mở project trên OpenProject → URL có dạng /projects/123 → lấy số 123.")
-    op_project_id = ask_int("  project_id", default=1)
+    tip("Lấy project identifier:")
+    tip("  Mở project trên OpenProject → xem URL, ví dụ:")
+    tip("    https://project.example.com/projects/lfc-ticketing-system")
+    tip("  → project identifier là 'lfc-ticketing-system' (có thể là chữ hoặc số).")
+    op_project_id = ask("  project identifier (slug hoặc số)")
 
     return {"url": op_url.rstrip("/"), "api_key": op_api_key, "project_id": op_project_id}
 
 
-def configure_group(idx: int) -> tuple[str, dict]:
+def configure_group(idx: int, github_token: str) -> tuple[str, dict]:
     section(f"Group #{idx}")
-    tip("Tên group phải khớp chính xác với tên group trên Zalo Web (bao gồm dấu, khoảng trắng).")
+    tip("Bot đọc tin nhắn từ group Zalo bằng tài khoản Zalo đã đăng nhập.")
+    tip("Điều kiện: tài khoản Zalo đó phải là thành viên của group.")
+    tip("Tên group phải khớp CHÍNH XÁC với tên hiển thị trong Zalo Web")
+    tip("  (bao gồm dấu, khoảng trắng, chữ hoa/thường).")
     group_name = ask("  Tên group Zalo")
 
     telegram_chat_id = configure_telegram_chat_id()
@@ -165,12 +243,13 @@ def configure_group(idx: int) -> tuple[str, dict]:
     print()
     tip("Mỗi group có thể map với 1 hoặc nhiều GitHub repo.")
     tip("AI sẽ tự chọn repo phù hợp nhất dựa trên nội dung bug report.")
-    repos = []
-    while True:
-        print(f"\n    --- Repo #{len(repos) + 1} ---")
-        repos.append(configure_repo())
-        if not ask_bool("    Thêm repo nữa cho group này?", default=False):
-            break
+    owner = ask("  GitHub org/username chứa repo")
+    repos = pick_repos(owner, github_token)
+    print(f"\n  ✓  Đã chọn {len(repos)} repo: {', '.join(r['name'] for r in repos)}")
+
+    if ask_bool("  Thêm repo từ org/username khác?", default=False):
+        extra_owner = ask("  GitHub org/username")
+        repos += pick_repos(extra_owner, github_token)
 
     op_cfg = configure_openproject()
 
@@ -190,13 +269,13 @@ def configure_zalo() -> tuple[str, int]:
     return session_dir, poll_interval
 
 
-def configure_groups() -> dict:
+def configure_groups(github_token: str) -> dict:
     section("5/5  Groups Zalo → Repo mapping")
     tip("Mỗi group Zalo sẽ được theo dõi và map với 1 hoặc nhiều GitHub repo.")
     groups = {}
     idx = 1
     while True:
-        name, cfg = configure_group(idx)
+        name, cfg = configure_group(idx, github_token)
         groups[name] = cfg
         idx += 1
         if not ask_bool("\nThêm group nữa?", default=False):
@@ -217,7 +296,7 @@ def main():
     print("Cần chuẩn bị trước:")
     print("  • Telegram bot token  (từ @BotFather)")
     print("  • GitHub Personal Access Token  (scope: repo)")
-    print("  • Anthropic API key  (từ console.anthropic.com)")
+    print("  • Google Gemini API key  (từ aistudio.google.com)")
     print("  • OpenProject API key  (nếu dùng)")
 
     if os.path.exists(output_path):
@@ -230,9 +309,9 @@ def main():
 
     bot_token, approved_ids = configure_telegram()
     github_token, pr_enabled = configure_github()
-    anthropic_key = configure_anthropic()
+    gemini_key = configure_gemini()
     session_dir, poll_interval = configure_zalo()
-    groups = configure_groups()
+    groups = configure_groups(github_token)
 
     # ── write config.yaml ──
     config = {
@@ -256,7 +335,7 @@ def main():
 
     # ── write .env ──
     with open(env_path, "w") as f:
-        f.write(f"ANTHROPIC_API_KEY={anthropic_key}\n")
+        f.write(f"GEMINI_API_KEY={gemini_key}\n")
 
     print("\n" + "─" * 50)
     print(f"✅  {output_path}  đã được tạo")

@@ -74,7 +74,7 @@ async def run(
     github = GitHubClient(token=config.github_token)
 
     # Shared state for the web dashboard
-    bot_state = {"bot_running": True, "zalo_running": False, "config": config}
+    bot_state = {"bot_running": True, "zalo_running": False, "config": config, "ai": ai}
 
     orchestrator_ref = []
 
@@ -88,7 +88,7 @@ async def run(
         on_callback=lambda aid, action, uid: orchestrator_ref[0].handle_callback(aid, action, uid),
     )
 
-    orchestrator = Orchestrator(config, db, bus, ai, code_agent, github, telegram)
+    orchestrator = Orchestrator(config, db, bus, ai, code_agent, github, telegram, bot_state=bot_state)
     orchestrator_ref.append(orchestrator)
 
     # Start Zalo listener
@@ -107,6 +107,12 @@ async def run(
         sys.exit(1)
 
     bot_state["zalo_running"] = True
+
+    # Mark all existing messages as processed so historical messages
+    # don't trigger AI calls when bot restarts with a fresh or cleared DB
+    marked = await db.mark_all_messages_processed()
+    if marked:
+        logger.info(f"Marked {marked} existing messages as processed (skip AI for historical data)")
 
     # Setup web dashboard
     auth = AuthManager()

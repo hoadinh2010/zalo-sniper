@@ -97,6 +97,15 @@ class Database:
         await self._conn.executescript(SCHEMA)
         await self._conn.executescript(SCHEMA_V2)
         await self._conn.commit()
+        await self._migrate_image_path()
+
+    async def _migrate_image_path(self) -> None:
+        """Add image_path column to messages table if missing."""
+        try:
+            await self._conn.execute("SELECT image_path FROM messages LIMIT 1")
+        except Exception:
+            await self._conn.execute("ALTER TABLE messages ADD COLUMN image_path TEXT")
+            await self._conn.commit()
 
     async def close(self) -> None:
         if self._conn:
@@ -108,10 +117,10 @@ class Database:
         try:
             async with self._conn.execute(
                 """INSERT OR IGNORE INTO messages
-                   (zalo_message_id, group_name, sender, content, timestamp)
-                   VALUES (?, ?, ?, ?, ?)""",
+                   (zalo_message_id, group_name, sender, content, timestamp, image_path)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
                 (msg.zalo_message_id, msg.group_name, msg.sender,
-                 msg.content, msg.timestamp.isoformat()),
+                 msg.content, msg.timestamp.isoformat(), msg.image_path),
             ) as cur:
                 await self._conn.commit()
                 # rowcount == 0 means IGNORE fired (duplicate); lastrowid unchanged
@@ -127,12 +136,49 @@ class Database:
         async with self._conn.execute(
             """SELECT * FROM messages
                WHERE group_name = ?
-                 AND timestamp >= datetime('now', ? || ' hours')
-               ORDER BY timestamp DESC LIMIT ?""",
+                 AND created_at >= datetime('now', ? || ' hours')
+               ORDER BY id DESC LIMIT ?""",
             (group_name, f"-{within_hours}", limit),
         ) as cur:
             rows = await cur.fetchall()
         return [_row_to_message(r) for r in rows]
+
+    async def get_unprocessed_messages(
+        self, group_name: str, limit: int = 20, within_hours: int = 1
+    ) -> List[Message]:
+        """Get recent messages that haven't been sent to Telegram yet."""
+        async with self._conn.execute(
+            """SELECT * FROM messages
+               WHERE group_name = ? AND processed = 0
+                 AND created_at >= datetime('now', ? || ' hours')
+               ORDER BY id DESC LIMIT ?""",
+            (group_name, f"-{within_hours}", limit),
+        ) as cur:
+            rows = await cur.fetchall()
+        return [_row_to_message(r) for r in rows]
+
+    async def mark_messages_processed(self, message_ids: List[int]) -> None:
+        """Mark messages as processed after sending Telegram notification."""
+        if not message_ids:
+            return
+        placeholders = ",".join("?" * len(message_ids))
+        await self._conn.execute(
+            f"UPDATE messages SET processed = 1 WHERE id IN ({placeholders})",
+            message_ids,
+        )
+        await self._conn.commit()
+
+    async def mark_all_messages_processed(self) -> int:
+        """Mark ALL unprocessed messages as processed.
+
+        Used at bot startup to avoid re-processing historical messages
+        that were already in Zalo before the bot started.
+        """
+        cur = await self._conn.execute(
+            "UPDATE messages SET processed = 1 WHERE processed = 0"
+        )
+        await self._conn.commit()
+        return cur.rowcount
 
     async def get_all_messages(
         self, group_name: str, days: int = 7, limit: int = 500
@@ -140,8 +186,8 @@ class Database:
         async with self._conn.execute(
             """SELECT * FROM messages
                WHERE group_name = ?
-                 AND timestamp >= datetime('now', ? || ' days')
-               ORDER BY timestamp DESC LIMIT ?""",
+                 AND created_at >= datetime('now', ? || ' days')
+               ORDER BY id DESC LIMIT ?""",
             (group_name, f"-{days}", limit),
         ) as cur:
             rows = await cur.fetchall()
@@ -152,11 +198,13 @@ class Database:
     async def insert_bug_analysis(self, analysis: BugAnalysis) -> int:
         async with self._conn.execute(
             """INSERT INTO bug_analyses
-               (message_ids, group_name, repo_owner, repo_name, repo_selection_reason, status)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+               (message_ids, group_name, repo_owner, repo_name, repo_selection_reason,
+                status, claude_summary)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (json.dumps(analysis.message_ids), analysis.group_name,
              analysis.repo_owner, analysis.repo_name,
-             analysis.repo_selection_reason, analysis.status.value),
+             analysis.repo_selection_reason, analysis.status.value,
+             analysis.claude_summary),
         ) as cur:
             await self._conn.commit()
             return cur.lastrowid
@@ -194,6 +242,33 @@ class Database:
             rows = await cur.fetchall()
         return [_row_to_analysis(r) for r in rows]
 
+    async def get_recent_open_analysis(self, group_name: str, within_hours: int = 2) -> Optional[BugAnalysis]:
+        """Get the most recent open (pending/task_only) bug analysis for a group."""
+        async with self._conn.execute(
+            """SELECT * FROM bug_analyses
+               WHERE group_name = ? AND status IN ('pending', 'task_only')
+                 AND created_at >= datetime('now', ? || ' hours')
+               ORDER BY created_at DESC LIMIT 1""",
+            (group_name, f"-{within_hours}"),
+        ) as cur:
+            row = await cur.fetchone()
+        return _row_to_analysis(row) if row else None
+
+    async def update_bug_analysis_context(
+        self, analysis_id: int, message_ids: List[int], claude_summary: str
+    ) -> bool:
+        """Update an existing bug analysis with additional message IDs and refined summary."""
+        analysis = await self.get_bug_analysis(analysis_id)
+        if not analysis:
+            return False
+        merged_ids = list(set(analysis.message_ids + message_ids))
+        async with self._conn.execute(
+            "UPDATE bug_analyses SET message_ids = ?, claude_summary = ? WHERE id = ?",
+            (json.dumps(merged_ids), claude_summary, analysis_id),
+        ) as cur:
+            await self._conn.commit()
+            return cur.rowcount > 0
+
     async def transition_status(
         self, analysis_id: int, from_status: BugStatus, to_status: BugStatus, **kwargs
     ) -> bool:
@@ -204,6 +279,13 @@ class Database:
         values = list(fields.values()) + [analysis_id, from_status.value]
         async with self._conn.execute(
             f"UPDATE bug_analyses SET {set_clause} WHERE id = ? AND status = ?", values
+        ) as cur:
+            await self._conn.commit()
+            return cur.rowcount > 0
+
+    async def delete_bug_analysis(self, analysis_id: int) -> bool:
+        async with self._conn.execute(
+            "DELETE FROM bug_analyses WHERE id = ?", (analysis_id,)
         ) as cur:
             await self._conn.commit()
             return cur.rowcount > 0
@@ -434,7 +516,8 @@ class Database:
         ) as cur:
             prs_created = (await cur.fetchone())["c"]
         async with self._conn.execute(
-            """SELECT id, group_name, repo_name, status, claude_summary, created_at
+            """SELECT id, group_name, repo_name, status, claude_summary, created_at,
+                      op_work_package_id, op_work_package_url, pr_url
                FROM bug_analyses ORDER BY created_at DESC LIMIT 20"""
         ) as cur:
             recent = [dict(r) for r in await cur.fetchall()]
@@ -456,6 +539,7 @@ def _row_to_message(row) -> Message:
         timestamp=datetime.fromisoformat(row["timestamp"]),
         zalo_message_id=row["zalo_message_id"],
         processed=bool(row["processed"]),
+        image_path=row["image_path"] if "image_path" in row.keys() else None,
     )
 
 

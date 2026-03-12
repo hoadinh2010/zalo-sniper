@@ -99,6 +99,25 @@ class TelegramBot:
         )
         return msg.message_id
 
+    async def send_bug_notification_with_text(
+        self, chat_id: int, text: str, analysis_id: int
+    ) -> Optional[int]:
+        """Send a single message with custom text + Tạo task / Bỏ qua buttons."""
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("📋 Tạo task", callback_data=f"task:{analysis_id}"),
+                InlineKeyboardButton("❌ Bỏ qua", callback_data=f"reject:{analysis_id}"),
+            ]
+        ])
+        try:
+            msg = await self._app.bot.send_message(
+                chat_id=chat_id, text=text, reply_markup=keyboard
+            )
+            return msg.message_id
+        except Exception as e:
+            logger.error(f"Failed to send bug notification to {chat_id}: {e}")
+            return None
+
     async def send_process_button(self, chat_id: int, analysis_id: int, text: str) -> Optional[int]:
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("🔧 Xử lý task (auto fix code)", callback_data=f"process:{analysis_id}")]

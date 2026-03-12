@@ -91,6 +91,18 @@ def create_api_router() -> APIRouter:
         # Never allow updating dashboard_password directly here
         body.pop("dashboard_password", None)
         await request.app.state.db.set_many_settings(body)
+
+        # Hot-reload AI config if AI settings changed
+        ai_keys = {"ai_provider", "ai_model", "ai_base_url", "gemini_api_key", "zai_api_key", "ai_api_key"}
+        if ai_keys & body.keys():
+            config = request.app.state.bot_state.get("config")
+            if config and hasattr(config, "reload_ai_config"):
+                new_ai = await config.reload_ai_config()
+                # Re-initialize AI analyzer with new config
+                from zalosniper.modules.ai_analyzer import AIAnalyzer
+                request.app.state.bot_state["ai"] = AIAnalyzer(new_ai)
+                logger.info(f"AI config reloaded: provider={new_ai.provider}, model={new_ai.model}")
+
         return {"ok": True}
 
     @router.get("/groups")
@@ -215,6 +227,129 @@ def create_api_router() -> APIRouter:
             repos = [r for r in repos if q_lower in r["full_name"].lower()]
         return repos
 
+    @router.delete("/analyses/{analysis_id}")
+    async def delete_analysis(analysis_id: int, request: Request):
+        if not _require_auth(request):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        ok = await request.app.state.db.delete_bug_analysis(analysis_id)
+        if not ok:
+            return JSONResponse({"error": "Not found"}, status_code=404)
+        return {"ok": True}
+
+    @router.post("/analyses/{analysis_id}/status")
+    async def update_analysis_status(analysis_id: int, request: Request):
+        if not _require_auth(request):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        body = await request.json()
+        new_status = body.get("status", "")
+        from zalosniper.models.bug_analysis import BugStatus
+        try:
+            status = BugStatus(new_status)
+        except ValueError:
+            return JSONResponse({"error": f"Invalid status: {new_status}"}, status_code=400)
+        ok = await request.app.state.db.update_bug_analysis_status(analysis_id, status)
+        if not ok:
+            return JSONResponse({"error": "Not found"}, status_code=404)
+        return {"ok": True}
+
+    @router.post("/analyses/{analysis_id}/create-op-task")
+    async def create_op_task(analysis_id: int, request: Request):
+        """Create an OpenProject task for a bug analysis from the dashboard."""
+        if not _require_auth(request):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        db = request.app.state.db
+        from zalosniper.models.bug_analysis import BugAnalysis, BugStatus
+        analysis = await db.get_bug_analysis(analysis_id)
+        if not analysis:
+            return JSONResponse({"error": "Not found"}, status_code=404)
+        if analysis.op_work_package_url:
+            return JSONResponse({"error": "Task OP da ton tai", "op_url": analysis.op_work_package_url}, status_code=409)
+        # Find group's OP config
+        groups = await db.get_all_groups()
+        group = next((g for g in groups if g["group_name"] == analysis.group_name), None)
+        if not group:
+            return JSONResponse({"error": "Group not found"}, status_code=404)
+        op_config = await db.get_group_openproject(group["id"])
+        if not op_config or not op_config.get("op_url") or not op_config.get("op_project_id"):
+            return JSONResponse({"error": "OpenProject chua duoc cau hinh cho group nay"}, status_code=400)
+        from zalosniper.modules.openproject_client import OpenProjectClient
+        client = OpenProjectClient(url=op_config["op_url"], api_key=op_config["op_api_key"])
+        summary = analysis.claude_summary or f"Bug #{analysis_id}"
+        # Build rich description with original messages
+        desc_parts = [f"**Tóm tắt:** {summary}"]
+        if analysis.message_ids:
+            msgs = await db.get_recent_messages(analysis.group_name, limit=50, within_hours=24)
+            msg_map = {m.id: m for m in msgs}
+            relevant = [msg_map[mid] for mid in analysis.message_ids if mid in msg_map]
+            if relevant:
+                desc_parts.append("\n**Tin nhắn gốc từ Zalo:**")
+                for m in relevant:
+                    desc_parts.append(f"- **{m.sender}** ({m.timestamp.strftime('%H:%M')}): {m.content}")
+        try:
+            op_id, op_url = await client.create_work_package(
+                project_id=op_config["op_project_id"],
+                title=f"Bug: {summary}",
+                description="\n".join(desc_parts),
+            )
+        except Exception as e:
+            return JSONResponse({"error": f"OpenProject error: {e}"}, status_code=500)
+        if not op_id:
+            return JSONResponse({"error": "Khong tao duoc task tren OpenProject"}, status_code=500)
+        # Upload images from linked messages
+        if relevant:
+            for m in relevant:
+                if hasattr(m, 'image_path') and m.image_path:
+                    try:
+                        await client.upload_attachment(op_id, m.image_path)
+                    except Exception:
+                        pass
+        await db.update_bug_analysis_status(
+            analysis_id, BugStatus(analysis.status.value),
+            op_work_package_id=op_id, op_work_package_url=op_url,
+        )
+        return {"ok": True, "op_id": op_id, "op_url": op_url}
+
+    @router.get("/analyses/{analysis_id}/op-info")
+    async def get_op_info(analysis_id: int, request: Request):
+        """Fetch OpenProject work package info for a bug analysis."""
+        if not _require_auth(request):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        db = request.app.state.db
+        analysis = await db.get_bug_analysis(analysis_id)
+        if not analysis or not analysis.op_work_package_id:
+            return JSONResponse({"error": "No OP task"}, status_code=404)
+        groups = await db.get_all_groups()
+        group = next((g for g in groups if g["group_name"] == analysis.group_name), None)
+        if not group:
+            return JSONResponse({"error": "Group not found"}, status_code=404)
+        op_config = await db.get_group_openproject(group["id"])
+        if not op_config or not op_config.get("op_url"):
+            return JSONResponse({"error": "OP not configured"}, status_code=400)
+        import aiohttp
+        import base64
+        auth = base64.b64encode(f"apikey:{op_config['op_api_key']}".encode()).decode()
+        headers = {"Authorization": f"Basic {auth}", "Content-Type": "application/json"}
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = f"{op_config['op_url'].rstrip('/')}/api/v3/work_packages/{analysis.op_work_package_id}"
+                async with session.get(url, headers=headers) as resp:
+                    if resp.status != 200:
+                        return JSONResponse({"error": f"OP API {resp.status}"}, status_code=resp.status)
+                    data = await resp.json()
+                    return {
+                        "id": data.get("id"),
+                        "subject": data.get("subject"),
+                        "status": data.get("_links", {}).get("status", {}).get("title", ""),
+                        "type": data.get("_links", {}).get("type", {}).get("title", ""),
+                        "assignee": data.get("_links", {}).get("assignee", {}).get("title", ""),
+                        "priority": data.get("_links", {}).get("priority", {}).get("title", ""),
+                        "created_at": data.get("createdAt", ""),
+                        "updated_at": data.get("updatedAt", ""),
+                        "url": analysis.op_work_package_url,
+                    }
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+
     @router.get("/chat")
     async def list_chat_groups(request: Request):
         if not _require_auth(request):
@@ -233,7 +368,9 @@ def create_api_router() -> APIRouter:
                 "sender": m.sender,
                 "content": m.content,
                 "timestamp": m.timestamp.strftime("%Y-%m-%d %H:%M:%S") if m.timestamp else None,
+                "created_at": m.created_at.strftime("%Y-%m-%d %H:%M:%S") if m.created_at else None,
                 "processed": m.processed,
+                "image_path": m.image_path,
             }
             for m in reversed(messages)  # oldest first for chat display
         ]

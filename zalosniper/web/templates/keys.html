@@ -43,18 +43,20 @@
   <div class="card-header"><span class="card-title">AI Settings</span></div>
   <div style="padding:24px;display:grid;gap:16px">
     <div class="form-group">
-      <label class="form-label">AI Provider</label>
-      <select id="ai_provider" class="form-control">
+      <label class="form-label">AI Provider đang sử dụng</label>
+      <select id="ai_provider" class="form-control" onchange="onProviderChange()">
         <option value="gemini">Gemini</option>
         <option value="zai">z.ai (GLM)</option>
         <option value="openai_compatible">OpenAI Compatible</option>
       </select>
+      <div id="provider-status" style="margin-top:6px;font-size:12px;color:var(--text-muted)"></div>
     </div>
     <div class="form-group">
       <label class="form-label">Model</label>
       <input type="text" id="ai_model" class="form-control" placeholder="gemini-2.0-flash">
+      <div id="model-hint" style="margin-top:4px;font-size:11px;color:var(--text-muted)"></div>
     </div>
-    <div class="form-group">
+    <div class="form-group" id="base-url-group" style="display:none">
       <label class="form-label">Base URL (chỉ dùng cho OpenAI Compatible)</label>
       <input type="text" id="ai_base_url" class="form-control" placeholder="https://api.example.com/v1">
     </div>
@@ -95,6 +97,23 @@
 {% block scripts %}
 <script>
 const SECRET_KEYS = ['gemini_api_key','zai_api_key','github_token','telegram_bot_token'];
+const PROVIDER_MODELS = {
+  gemini: {key:'gemini_api_key', models:['gemini-2.0-flash','gemini-2.5-pro','gemini-2.5-flash'], default:'gemini-2.0-flash'},
+  zai: {key:'zai_api_key', models:['glm-4.7-flash','glm-4-flash','glm-4-plus','glm-4-long'], default:'glm-4.7-flash'},
+  openai_compatible: {key:'ai_api_key', models:['gpt-4o','gpt-4o-mini','claude-sonnet-4-20250514'], default:'gpt-4o'},
+};
+
+function onProviderChange() {
+  const prov = document.getElementById('ai_provider').value;
+  const info = PROVIDER_MODELS[prov];
+  // Show/hide base URL
+  document.getElementById('base-url-group').style.display = prov === 'openai_compatible' ? '' : 'none';
+  // Highlight which API key is being used
+  const status = document.getElementById('provider-status');
+  status.innerHTML = `Sử dụng key: <strong>${info.key}</strong>`;
+  // Model hint
+  document.getElementById('model-hint').innerHTML = `Gợi ý: ${info.models.map(m => `<a href="#" onclick="document.getElementById('ai_model').value='${m}';return false" style="color:var(--primary)">${m}</a>`).join(', ')}`;
+}
 
 function toggleShow(id, btn) {
   const inp = document.getElementById(id);
@@ -119,6 +138,7 @@ async function loadSettings() {
   };
   setToggle('toggle-pr', data.github_pr_enabled || '1');
   setToggle('toggle-dry', data.dry_run || '0');
+  onProviderChange();
 }
 
 async function toggleSetting(key, btn) {
@@ -138,7 +158,10 @@ async function saveKeys() {
     if (val) body[k] = val;
   });
   const resp = await POST('/api/settings', body);
-  if (resp) toast('Đã lưu cài đặt!');
+  if (resp) {
+    const aiChanged = ['ai_provider','ai_model','ai_base_url','gemini_api_key','zai_api_key','ai_api_key'].some(k => body[k]);
+    toast(aiChanged ? 'Đã lưu và reload AI config!' : 'Đã lưu cài đặt!');
+  }
 }
 
 async function changePassword() {

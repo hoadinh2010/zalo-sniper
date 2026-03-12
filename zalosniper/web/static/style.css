@@ -78,6 +78,16 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 .btn-danger { background: #7f1d1d; color: var(--red); border: none; }
 .btn-danger:hover { background: #991b1b; }
 .btn-sm { padding: 5px 11px; font-size: 12px; }
+.btn-green { background: #166534; color: #4ade80; border: none; }
+.btn-green:hover { background: #15803d; }
+.btn-yellow { background: #713f12; color: #facc15; border: none; }
+.btn-yellow:hover { background: #854d0e; }
+.btn-red { background: #7f1d1d; color: #f87171; border: none; }
+.btn-red:hover { background: #991b1b; }
+.btn-blue { background: #1e3a5f; color: #38bdf8; border: none; text-decoration: none; }
+.btn-blue:hover { background: #1e4976; }
+.actions-cell { white-space: nowrap; }
+.actions-cell .btn { margin: 1px 2px; }
 
 /* ── Content ── */
 .content { padding: 28px 32px; }

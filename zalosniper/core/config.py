@@ -165,6 +165,26 @@ class ConfigManager:
             )
         return instance
 
+    async def reload_ai_config(self) -> AIConfig:
+        """Reload AI settings from DB and return new AIConfig.
+
+        Updates self.ai in place and returns it so callers can
+        re-initialize their AI client if needed.
+        """
+        if self._db is None:
+            raise RuntimeError("reload_ai_config() requires a DB-backed ConfigManager")
+        settings = await self._db.get_all_settings()
+        provider = settings.get("ai_provider", "gemini")
+        _default_models = {"gemini": "gemini-2.0-flash", "zai": "glm-4.7-flash"}
+        key_map = {"gemini": "gemini_api_key", "zai": "zai_api_key"}
+        self.ai = AIConfig(
+            provider=provider,
+            model=settings.get("ai_model", _default_models.get(provider, "gpt-4o-mini")),
+            api_key=settings.get(key_map.get(provider, "ai_api_key"), ""),
+            base_url=settings.get("ai_base_url", ""),
+        )
+        return self.ai
+
     async def reload_groups(self) -> None:
         """Reload groups from DB into memory (called after enable/disable)."""
         if self._db is None:

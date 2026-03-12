@@ -13,13 +13,104 @@
     <span class="card-title">Bug analyses gần đây</span>
   </div>
   <table>
-    <thead><tr><th>ID</th><th>Group</th><th>Tóm tắt</th><th>Repo</th><th>Trạng thái</th><th>Thời gian</th></tr></thead>
-    <tbody id="analyses-tbody"><tr><td colspan="6" style="text-align:center;color:var(--text-muted)">Đang tải...</td></tr></tbody>
+    <thead><tr><th>ID</th><th>Group</th><th>Tóm tắt</th><th>Repo</th><th>Trạng thái</th><th>OP Task</th><th>Thời gian</th><th>Thao tác</th></tr></thead>
+    <tbody id="analyses-tbody"><tr><td colspan="8" style="text-align:center;color:var(--text-muted)">Đang tải...</td></tr></tbody>
   </table>
+</div>
+
+<!-- OP Info Modal -->
+<div id="op-modal" style="display:none;position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,.5);display:none;align-items:center;justify-content:center">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:24px;max-width:480px;width:90%">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+      <strong style="font-size:15px" id="op-modal-title">OpenProject Task</strong>
+      <button class="btn btn-ghost btn-sm" onclick="closeOpModal()">✕</button>
+    </div>
+    <div id="op-modal-body" style="font-size:13px;display:grid;gap:10px">Đang tải...</div>
+  </div>
 </div>
 {% endblock %}
 {% block scripts %}
 <script>
+function bugActions(a) {
+  const btns = [];
+  if (a.status === 'pending' || a.status === 'task_only') {
+    btns.push(`<button class="btn btn-sm btn-green" onclick="setBugStatus(${a.id},'done')">Done</button>`);
+  }
+  if (a.status === 'pending') {
+    btns.push(`<button class="btn btn-sm btn-yellow" onclick="setBugStatus(${a.id},'rejected')">Reject</button>`);
+  }
+  if (!a.op_work_package_url) {
+    btns.push(`<button class="btn btn-sm btn-blue" onclick="createOpTask(${a.id})">Tạo task</button>`);
+  }
+  if (a.pr_url) {
+    btns.push(`<a href="${a.pr_url}" target="_blank" class="btn btn-sm btn-blue">PR</a>`);
+  }
+  btns.push(`<button class="btn btn-sm btn-red" onclick="deleteBug(${a.id})">Xóa</button>`);
+  return btns.join(' ');
+}
+
+function opColumn(a) {
+  if (!a.op_work_package_url) return '<span style="color:var(--text-muted)">—</span>';
+  return `<a href="#" onclick="showOpInfo(${a.id});return false" class="btn btn-sm btn-blue">
+    #${a.op_work_package_id || 'OP'}
+  </a>`;
+}
+
+async function createOpTask(id) {
+  const btn = event.target;
+  btn.disabled = true;
+  btn.textContent = '...';
+  const res = await POST(`/api/analyses/${id}/create-op-task`, {});
+  if (res && res.ok) {
+    toast('Đã tạo task trên OpenProject!');
+    loadDashboard();
+  } else if (res && res.error) {
+    toast(res.error, 'error');
+    btn.disabled = false;
+    btn.textContent = 'Tạo task';
+  }
+}
+
+async function showOpInfo(id) {
+  const modal = document.getElementById('op-modal');
+  modal.style.display = 'flex';
+  document.getElementById('op-modal-body').innerHTML = 'Đang tải thông tin từ OpenProject...';
+  const data = await GET(`/api/analyses/${id}/op-info`);
+  if (!data || data.error) {
+    document.getElementById('op-modal-body').innerHTML = `<div style="color:var(--red)">${data?.error || 'Lỗi kết nối'}</div>`;
+    return;
+  }
+  document.getElementById('op-modal-title').textContent = `OpenProject #${data.id}`;
+  document.getElementById('op-modal-body').innerHTML = `
+    <div><strong>Tiêu đề:</strong> ${data.subject || '—'}</div>
+    <div><strong>Trạng thái:</strong> ${data.status || '—'}</div>
+    <div><strong>Loại:</strong> ${data.type || '—'}</div>
+    <div><strong>Người xử lý:</strong> ${data.assignee || 'Chưa gán'}</div>
+    <div><strong>Ưu tiên:</strong> ${data.priority || '—'}</div>
+    <div><strong>Tạo lúc:</strong> ${data.created_at ? data.created_at.slice(0,16) : '—'}</div>
+    <div><strong>Cập nhật:</strong> ${data.updated_at ? data.updated_at.slice(0,16) : '—'}</div>
+    <div style="margin-top:8px"><a href="${data.url}" target="_blank" class="btn btn-primary btn-sm">Mở trên OpenProject</a></div>
+  `;
+}
+
+function closeOpModal() {
+  document.getElementById('op-modal').style.display = 'none';
+}
+document.getElementById('op-modal').addEventListener('click', function(e) {
+  if (e.target === this) closeOpModal();
+});
+
+async function setBugStatus(id, status) {
+  const res = await POST(`/api/analyses/${id}/status`, {status});
+  if (res && res.ok) loadDashboard();
+}
+
+async function deleteBug(id) {
+  if (!confirm('Xóa bug #' + id + '?')) return;
+  const res = await DELETE(`/api/analyses/${id}`);
+  if (res && res.ok) loadDashboard();
+}
+
 async function loadDashboard() {
   const data = await GET('/api/status');
   if (!data) return;
@@ -29,7 +120,7 @@ async function loadDashboard() {
   document.getElementById('s-prs').textContent = data.prs_created;
   const tbody = document.getElementById('analyses-tbody');
   if (!data.recent_analyses || !data.recent_analyses.length) {
-    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--text-muted)">Chưa có dữ liệu</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text-muted)">Chưa có dữ liệu</td></tr>';
     return;
   }
   tbody.innerHTML = data.recent_analyses.map(a => `
@@ -39,7 +130,9 @@ async function loadDashboard() {
       <td>${a.claude_summary || '—'}</td>
       <td style="color:var(--text-muted)">${a.repo_name || '—'}</td>
       <td>${statusPill(a.status)}</td>
+      <td>${opColumn(a)}</td>
       <td style="color:var(--text-muted)">${a.created_at ? a.created_at.slice(0,16) : '—'}</td>
+      <td class="actions-cell">${bugActions(a)}</td>
     </tr>`).join('');
 }
 document.addEventListener('DOMContentLoaded', loadDashboard);

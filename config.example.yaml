@@ -3,6 +3,28 @@
 
 dry_run: false   # true = analyse only, never create PR or task
 
+# AI provider settings
+ai:
+  provider: "gemini"             # gemini | zai | openai_compatible
+  # model: "gemini-2.0-flash"   # default for gemini; use "glm-4.7-flash" for zai
+  # api_key: ""                  # leave empty → reads from env var:
+  #                              #   gemini  → GEMINI_API_KEY
+  #                              #   zai     → ZAI_API_KEY
+  #                              #   others  → AI_API_KEY
+  # base_url: ""                 # only for openai_compatible
+  #                              # (zai sets this automatically)
+
+# Example: switch to z.ai (GLM models)
+# ai:
+#   provider: "zai"
+#   model: "glm-4.7-flash"      # free tier — or "glm-4.7" for flagship
+
+# Example: any OpenAI-compatible API
+# ai:
+#   provider: "openai_compatible"
+#   model: "gpt-4o-mini"
+#   base_url: "https://your-provider.com/v1/"
+
 telegram:
   bot_token: "YOUR_BOT_TOKEN"
   approved_user_ids: [123456789]   # Telegram user IDs allowed to approve fixes
@@ -30,4 +52,4 @@ groups:
     openproject:
       url: "https://openproject.example.com"
       api_key: "YOUR_OP_API_KEY"
-      project_id: 1
+      project_id: "my-project-slug"   # số hoặc slug từ URL: /projects/my-project-slug

@@ -16,7 +16,7 @@ from zalosniper.modules.zalo_selectors import (
     GROUP_LIST_ITEM, GROUP_NAME_SELECTOR,
     MESSAGE_ITEM, MESSAGE_SENDER, MESSAGE_CONTENT,
     MESSAGE_TIME, MESSAGE_FRAME, MESSAGE_ID_ATTR, MESSAGE_ME_CLASS,
-    MESSAGE_DATE_DIVIDER,
+    MESSAGE_DATE_DIVIDER, MESSAGE_IMAGE,
 )
 
 logger = logging.getLogger(__name__)
@@ -313,6 +313,14 @@ class ZaloListener:
                 content = (await content_el.inner_text()).strip() if content_el else ""
                 time_str = (await time_el.inner_text()).strip() if time_el else ""
 
+                # Check for images
+                image_url = None
+                img_el = await child.query_selector(MESSAGE_IMAGE)
+                if img_el:
+                    image_url = await img_el.get_attribute("src")
+                    if not content:
+                        content = "[Hình ảnh]"
+
                 if content:
                     raw.append({
                         "sender": sender,
@@ -320,17 +328,52 @@ class ZaloListener:
                         "time_str": time_str,
                         "date_context": current_date,
                         "zalo_message_id": msg_id,
+                        "image_url": image_url,
                     })
             except Exception as e:
                 logger.debug(f"Failed to extract message element: {e}")
         return raw
 
+    async def _download_image(self, image_url: str, group_name: str, msg_id: str) -> Optional[str]:
+        """Download an image from Zalo and save it locally. Returns the local file path."""
+        if not image_url or not image_url.startswith("http"):
+            return None
+        try:
+            images_dir = Path("data/images") / group_name.replace("/", "_")
+            images_dir.mkdir(parents=True, exist_ok=True)
+
+            # Use page context to download (preserves Zalo auth cookies)
+            response = await self._page.request.get(image_url)
+            if response.status != 200:
+                logger.debug(f"Image download failed ({response.status}): {image_url[:80]}")
+                return None
+
+            body = await response.body()
+            content_type = response.headers.get("content-type", "image/jpeg")
+            ext = ".jpg"
+            if "png" in content_type:
+                ext = ".png"
+            elif "gif" in content_type:
+                ext = ".gif"
+            elif "webp" in content_type:
+                ext = ".webp"
+
+            safe_id = (msg_id or "unknown").replace("/", "_")[:50]
+            filename = f"{safe_id}{ext}"
+            filepath = images_dir / filename
+            filepath.write_bytes(body)
+            logger.debug(f"Image saved: {filepath}")
+            return str(filepath)
+        except Exception as e:
+            logger.debug(f"Failed to download image: {e}")
+            return None
+
     async def _process_extracted_messages(
         self, group_name: str, raw_messages: List[dict]
     ) -> None:
-        """Parse raw DOM data, filter by last_seen timestamp, save to DB, emit events."""
-        last_seen = self._last_seen.get(group_name, datetime.min)
+        """Parse raw DOM data, save to DB (dedup via UNIQUE constraints), emit events."""
         new_count = 0
+        max_ts = self._last_seen.get(group_name, datetime.min)
 
         for raw in raw_messages:
             try:
@@ -338,8 +381,13 @@ class ZaloListener:
             except Exception:
                 ts = datetime.now()
 
-            if ts <= last_seen:
-                continue   # already seen
+            # Download image if present
+            image_path = None
+            if raw.get("image_url"):
+                image_path = await self._download_image(
+                    raw["image_url"], group_name,
+                    raw.get("zalo_message_id") or str(ts.timestamp()),
+                )
 
             msg = Message(
                 id=None,
@@ -348,13 +396,16 @@ class ZaloListener:
                 content=raw["content"],
                 timestamp=ts,
                 zalo_message_id=raw.get("zalo_message_id"),
+                image_path=image_path,
             )
             msg_id = await self._db.insert_message(msg)
             if msg_id:
                 new_count += 1
+                if ts > max_ts:
+                    max_ts = ts
 
         if new_count > 0:
-            self._last_seen[group_name] = datetime.now()
+            self._last_seen[group_name] = max_ts
             await self._bus.publish(Event(
                 type="NEW_MESSAGE",
                 data={"group_name": group_name, "new_count": new_count}
