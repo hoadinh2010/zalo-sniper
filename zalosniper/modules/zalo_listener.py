@@ -11,8 +11,10 @@ from zalosniper.core.database import Database
 from zalosniper.core.event_bus import Event, EventBus
 from zalosniper.models.message import Message
 from zalosniper.modules.zalo_selectors import (
-    ZALO_WEB_URL, LOGIN_INDICATOR, MESSAGE_ITEM,
-    MESSAGE_SENDER, MESSAGE_CONTENT, MESSAGE_TIME, MESSAGE_ID_ATTR,
+    ZALO_WEB_URL, LOGIN_INDICATOR,
+    GROUP_LIST_ITEM, GROUP_NAME_SELECTOR,
+    MESSAGE_ITEM, MESSAGE_SENDER, MESSAGE_CONTENT,
+    MESSAGE_TIME, MESSAGE_FRAME, MESSAGE_ID_ATTR, MESSAGE_ME_CLASS,
 )
 
 logger = logging.getLogger(__name__)
@@ -82,13 +84,16 @@ class ZaloListener:
 
         self._page = await self._context.new_page()
         await self._page.goto(ZALO_WEB_URL)
+        await self._dismiss_dialogs()
 
         if not await self._is_session_valid():
             if not headless:
-                logger.info("Session invalid — waiting for manual login...")
-                await self._page.wait_for_selector(LOGIN_INDICATOR, timeout=120_000)
+                logger.info("Session invalid — browser opened, please scan QR code in Chromium.")
+                logger.info("After chat loads, press ENTER here to save session and continue...")
+                # Run blocking input() in executor so event loop isn't blocked
+                await asyncio.get_event_loop().run_in_executor(None, input)
                 await self._context.storage_state(path=str(state_file))
-                logger.info("Session saved.")
+                logger.info(f"Session saved to {state_file}")
                 return True
             else:
                 logger.warning("Zalo session expired.")
@@ -101,18 +106,89 @@ class ZaloListener:
     async def _is_session_valid(self) -> bool:
         if not self._page:
             return False
-        if "login" in self._page.url:
-            return False
+        # Wait for page to finish initial navigation
         try:
-            await self._page.wait_for_selector(LOGIN_INDICATOR, timeout=5_000)
-            return True
+            await self._page.wait_for_load_state("networkidle", timeout=10_000)
         except Exception:
+            pass
+        url = self._page.url
+        # Zalo redirects to a login/QR page when session is expired
+        # When logged in, URL stays at chat.zalo.me without login-related paths
+        if any(kw in url for kw in ("login", "signin", "qr", "auth")):
             return False
+        # If still at chat.zalo.me root or deeper, session is likely valid
+        return "chat.zalo.me" in url
+
+    async def _dismiss_dialogs(self) -> None:
+        """Auto-dismiss Zalo Web popups, sync banners, and notification prompts."""
+        try:
+            dismissed = await self._page.evaluate("""
+                () => {
+                    let count = 0;
+
+                    // Generic close/dismiss buttons
+                    const closeSelectors = [
+                        '[class*="close-btn"]',
+                        '[class*="closeBtn"]',
+                        '[class*="btn-close"]',
+                        '[data-id*="close"]',
+                        '[class*="dismiss"]',
+                        '[aria-label="Close"]',
+                        '[aria-label="Đóng"]',
+                    ];
+                    for (const sel of closeSelectors) {
+                        const btns = document.querySelectorAll(sel);
+                        for (const btn of btns) {
+                            const rect = btn.getBoundingClientRect();
+                            if (rect.width > 0 && rect.height > 0) {
+                                btn.click();
+                                count++;
+                            }
+                        }
+                    }
+
+                    // Sync / message history suggestion banner
+                    const banners = document.querySelectorAll(
+                        '[class*="suggestion-wrapper"], [class*="ecard-web__suggestion"]'
+                    );
+                    for (const b of banners) {
+                        const closeBtns = b.querySelectorAll('button, [class*="close"], [class*="dismiss"]');
+                        if (closeBtns.length > 0) {
+                            closeBtns[0].click();
+                            count++;
+                        } else {
+                            b.remove();
+                            count++;
+                        }
+                    }
+
+                    // Notification permission modal — click "Không" / "Từ chối" / "Bỏ qua"
+                    const allButtons = Array.from(document.querySelectorAll('button'));
+                    const rejectLabels = ['không', 'từ chối', 'bỏ qua', 'cancel', 'skip', 'later'];
+                    for (const btn of allButtons) {
+                        const label = (btn.innerText || btn.textContent || '').trim().toLowerCase();
+                        if (rejectLabels.some(l => label === l || label.includes(l))) {
+                            const rect = btn.getBoundingClientRect();
+                            if (rect.width > 0 && rect.height > 0) {
+                                btn.click();
+                                count++;
+                            }
+                        }
+                    }
+
+                    return count;
+                }
+            """)
+            if dismissed:
+                logger.debug(f"Dismissed {dismissed} dialog element(s).")
+        except Exception as e:
+            logger.debug(f"_dismiss_dialogs: {e}")
 
     async def run_poll_loop(self) -> None:
         """Poll all configured groups in a loop."""
         self._running = True
         while self._running:
+            await self._dismiss_dialogs()
             for group_name in self._config.groups:
                 try:
                     await self._poll_group(group_name)
@@ -124,21 +200,31 @@ class ZaloListener:
 
     async def _poll_group(self, group_name: str) -> None:
         """Navigate to a group, extract new messages, save to DB, emit event."""
-        # Step 1: Search for the group in the sidebar search box
+        # Step 1: Type group name into the search box
         search_box = await self._page.wait_for_selector(LOGIN_INDICATOR, timeout=5_000)
         await search_box.click()
         await search_box.fill(group_name)
-        await asyncio.sleep(1)   # wait for search results
+        await asyncio.sleep(1.5)   # wait for search results to render
 
-        # Step 2: Click the first matching result
-        group_items = await self._page.query_selector_all(
-            f"[title='{group_name}'], .group-item:has-text('{group_name}')"
-        )
-        if not group_items:
+        # Step 2: Find conv-item whose name matches exactly, then click it
+        conv_items = await self._page.query_selector_all(GROUP_LIST_ITEM)
+        target = None
+        for item in conv_items:
+            name_el = await item.query_selector(GROUP_NAME_SELECTOR)
+            if name_el:
+                name_text = (await name_el.inner_text()).strip()
+                if name_text == group_name:
+                    target = item
+                    break
+
+        if not target:
             logger.warning(f"Group not found in Zalo sidebar: {group_name!r}")
+            await search_box.fill("")
             return
-        await group_items[0].click()
-        await asyncio.sleep(1)   # wait for messages to load
+
+        await target.click()
+        await asyncio.sleep(1.5)   # wait for messages to load
+        await self._dismiss_dialogs()
 
         # Step 3: Extract messages from the DOM
         raw_messages = await self._extract_messages_from_dom()
@@ -146,8 +232,9 @@ class ZaloListener:
         # Step 4: Filter new messages and save
         await self._process_extracted_messages(group_name, raw_messages)
 
-        # Step 5: Clear search box
+        # Step 5: Clear search box to restore full conversation list
         await search_box.fill("")
+        await search_box.press("Escape")
 
     async def _extract_messages_from_dom(self) -> List[dict]:
         """Extract raw message data from the current group page DOM."""
@@ -155,12 +242,20 @@ class ZaloListener:
         items = await self._page.query_selector_all(MESSAGE_ITEM)
         for item in items:
             try:
+                classes = await item.get_attribute("class") or ""
+                is_me = MESSAGE_ME_CLASS in classes.split()
+
                 sender_el = await item.query_selector(MESSAGE_SENDER)
                 content_el = await item.query_selector(MESSAGE_CONTENT)
                 time_el = await item.query_selector(MESSAGE_TIME)
-                msg_id = await item.get_attribute(MESSAGE_ID_ATTR)
+                frame_el = await item.query_selector(MESSAGE_FRAME)
+                msg_id = (await frame_el.get_attribute(MESSAGE_ID_ATTR)) if frame_el else None
 
-                sender = (await sender_el.inner_text()).strip() if sender_el else "Unknown"
+                if is_me:
+                    sender = "me"
+                else:
+                    sender = (await sender_el.inner_text()).strip() if sender_el else "Unknown"
+
                 content = (await content_el.inner_text()).strip() if content_el else ""
                 time_str = (await time_el.inner_text()).strip() if time_el else ""
 

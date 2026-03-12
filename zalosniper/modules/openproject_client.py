@@ -16,7 +16,7 @@ class OpenProjectClient:
 
     async def create_work_package(
         self,
-        project_id: int,
+        project_id: str,
         title: str,
         description: str,
         status: str = "new",

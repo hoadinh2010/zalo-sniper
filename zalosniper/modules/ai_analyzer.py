@@ -2,14 +2,10 @@ import json
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
-import anthropic
-
-from zalosniper.core.config import RepoConfig
+from zalosniper.core.config import AIConfig, RepoConfig
 from zalosniper.models.message import Message
 
 logger = logging.getLogger(__name__)
-
-MODEL = "claude-sonnet-4-6"
 
 
 def _messages_to_text(messages: List[Message]) -> str:
@@ -20,19 +16,42 @@ def _messages_to_text(messages: List[Message]) -> str:
 
 
 class AIAnalyzer:
-    def __init__(self, api_key: str, model: str = MODEL) -> None:
-        # Use AsyncAnthropic to avoid blocking the event loop
-        self._client = anthropic.AsyncAnthropic(api_key=api_key)
-        self._model = model
+    def __init__(self, config: AIConfig) -> None:
+        self._config = config
+        self._provider = config.provider
+        self._model = config.model
+        api_key = config.resolved_api_key()
+
+        if self._provider == "gemini":
+            from google import genai
+            self._gemini_client = genai.Client(api_key=api_key)
+        else:
+            # zai or any openai_compatible provider
+            from openai import AsyncOpenAI
+            base_url = config.base_url
+            if not base_url and self._provider == "zai":
+                base_url = "https://api.z.ai/api/paas/v4/"
+            self._openai_client = AsyncOpenAI(api_key=api_key, base_url=base_url)
 
     async def _call(self, system: str, user: str) -> str:
-        response = await self._client.messages.create(
-            model=self._model,
-            max_tokens=4096,
-            system=system,
-            messages=[{"role": "user", "content": user}],
-        )
-        return response.content[0].text
+        if self._provider == "gemini":
+            from google.genai import types as genai_types
+            response = await self._gemini_client.aio.models.generate_content(
+                model=self._model,
+                contents=f"{system}\n\n{user}",
+                config=genai_types.GenerateContentConfig(max_output_tokens=4096),
+            )
+            return response.text
+        else:
+            response = await self._openai_client.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                max_tokens=4096,
+            )
+            return response.choices[0].message.content
 
     def _parse_json(self, text: str) -> Dict[str, Any]:
         """Extract JSON from Claude response (may have surrounding text)."""
@@ -45,16 +64,55 @@ class AIAnalyzer:
         except json.JSONDecodeError as exc:
             raise ValueError(f"Invalid JSON in Claude response: {exc}") from exc
 
-    async def classify_messages(self, messages: List[Message]) -> Dict[str, Any]:
-        """Classify messages as bug_report or noise."""
+    async def triage_messages(self, messages: List[Message]) -> Dict[str, Any]:
+        """Single call: summarize + classify + extract issues with solutions.
+
+        Returns: {
+            "type": "bug_report" | "noise",
+            "summary": str,           # overall Vietnamese summary
+            "affected_feature": str,
+            "issues": [               # list of distinct problems found
+                {
+                    "title": str,
+                    "description": str,
+                    "proposed_solution": str
+                }
+            ]
+        }
+        """
         chat = _messages_to_text(messages)
         system = (
-            "You are a bug triage assistant. Analyze the Zalo chat messages and determine "
-            "if they contain a bug report from users. "
-            "Respond ONLY with JSON: {\"type\": \"bug_report\"|\"noise\", \"summary\": str, \"affected_feature\": str}"
+            "You are a bug triage assistant for a Vietnamese software team. "
+            "Analyze the Zalo group chat messages carefully and respond ONLY with valid JSON (no markdown, no extra text).\n\n"
+            "JSON schema:\n"
+            '{\n'
+            '  "type": "bug_report" or "noise",\n'
+            '  "summary": "<1-3 sentence Vietnamese summary of what was discussed>",\n'
+            '  "affected_feature": "<feature or component name, empty string if noise>",\n'
+            '  "issues": [\n'
+            '    {\n'
+            '      "title": "<short Vietnamese title of the issue>",\n'
+            '      "description": "<detailed Vietnamese description>",\n'
+            '      "proposed_solution": "<concrete suggestion to fix or investigate>"\n'
+            '    }\n'
+            '  ]\n'
+            '}\n\n'
+            'Rules:\n'
+            '- If type is "noise", issues must be an empty array [].\n'
+            '- Split distinct problems into separate issue objects.\n'
+            '- proposed_solution must be actionable (e.g. "Kiểm tra null check ở hàm login()", not "cần xem lại code").\n'
+            '- Respond in Vietnamese for all text fields.'
         )
         text = await self._call(system, f"Messages:\n{chat}")
-        return self._parse_json(text)
+        result = self._parse_json(text)
+        if "issues" not in result:
+            result["issues"] = []
+        return result
+
+    async def classify_messages(self, messages: List[Message]) -> Dict[str, Any]:
+        """Classify messages as bug_report or noise. Prefer triage_messages() to save API calls."""
+        result = await self.triage_messages(messages)
+        return result
 
     async def select_repo(
         self, messages: List[Message], repos: List[RepoConfig]

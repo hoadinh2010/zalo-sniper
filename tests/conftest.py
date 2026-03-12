@@ -7,10 +7,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 @pytest.fixture
 def mock_claude_response():
-    """Factory for mocked Claude API text response."""
+    """Factory for mocked Gemini API text response."""
     def _make(text: str):
         response = MagicMock()
-        response.content = [MagicMock(text=text)]
+        response.text = text
         return response
     return _make
 
