@@ -191,9 +191,34 @@ class ZaloListener:
                         }
                     }
 
+                    // Zalo modal overlays (zl-modal) — dismiss by clicking close or removing
+                    const modals = document.querySelectorAll('[class*="zl-modal"], [id*="zl-modal"]');
+                    for (const modal of modals) {
+                        // Try close button inside modal first
+                        const closeBtn = modal.querySelector('[class*="close"], [aria-label="Close"], [aria-label="Đóng"], button');
+                        if (closeBtn) {
+                            closeBtn.click();
+                            count++;
+                        } else {
+                            // Force remove the modal overlay
+                            modal.remove();
+                            count++;
+                        }
+                    }
+                    // Also remove any modal backdrop/overlay containers
+                    const overlays = document.querySelectorAll('[class*="zl-modal__container"], [class*="ovf-hidden"]');
+                    for (const ov of overlays) {
+                        // Check if it's a modal overlay blocking interaction
+                        const style = window.getComputedStyle(ov);
+                        if (style.position === 'fixed' && style.zIndex > 100) {
+                            ov.remove();
+                            count++;
+                        }
+                    }
+
                     // Notification permission modal — click "Không" / "Từ chối" / "Bỏ qua"
                     const allButtons = Array.from(document.querySelectorAll('button'));
-                    const rejectLabels = ['không', 'từ chối', 'bỏ qua', 'cancel', 'skip', 'later'];
+                    const rejectLabels = ['không', 'từ chối', 'bỏ qua', 'cancel', 'skip', 'later', 'đóng'];
                     for (const btn of allButtons) {
                         const label = (btn.innerText || btn.textContent || '').trim().toLowerCase();
                         if (rejectLabels.some(l => label === l || label.includes(l))) {
@@ -251,7 +276,15 @@ class ZaloListener:
             await search_box.fill("")
             return
 
-        await target.click()
+        # Dismiss any modal overlay before clicking
+        await self._dismiss_dialogs()
+        try:
+            await target.click(timeout=10000)
+        except Exception:
+            # Modal might have blocked click — dismiss again and retry
+            await self._dismiss_dialogs()
+            await asyncio.sleep(0.5)
+            await target.click(timeout=10000)
         await asyncio.sleep(1.5)   # wait for messages to load
         await self._dismiss_dialogs()
 
@@ -313,13 +346,35 @@ class ZaloListener:
                 content = (await content_el.inner_text()).strip() if content_el else ""
                 time_str = (await time_el.inner_text()).strip() if time_el else ""
 
-                # Check for images
+                # Check for images — use JS to find any meaningful img inside
                 image_url = None
-                img_el = await child.query_selector(MESSAGE_IMAGE)
-                if img_el:
-                    image_url = await img_el.get_attribute("src")
-                    if not content:
-                        content = "[Hình ảnh]"
+                img_info = await child.evaluate("""
+                    (el) => {
+                        const imgs = el.querySelectorAll('img');
+                        const all = [];
+                        for (const img of imgs) {
+                            const src = img.src || img.getAttribute('data-src') || '';
+                            const w = img.naturalWidth || img.width || 0;
+                            const h = img.naturalHeight || img.height || 0;
+                            const cls = (img.className || '').toLowerCase();
+                            all.push({src: src.slice(0, 100), w, h, cls});
+                            // Skip tiny images (emojis, icons, avatars)
+                            if (cls.includes('emoji') || cls.includes('avatar') || cls.includes('icon')) continue;
+                            if (w > 0 && w < 30) continue;
+                            // Skip SVG placeholders
+                            if (src.startsWith('data:image/svg')) continue;
+                            if (src && (src.startsWith('http') || src.startsWith('blob:'))) return {found: src, all};
+                        }
+                        return {found: null, all};
+                    }
+                """)
+                if img_info and img_info.get("all"):
+                    logger.debug(f"Images in message: {img_info['all']}")
+                image_url = img_info.get("found") if img_info else None
+                if image_url:
+                    logger.info(f"Found image in message: {image_url[:80]}")
+                if image_url and not content:
+                    content = "[Hình ảnh]"
 
                 if content:
                     raw.append({
@@ -336,11 +391,40 @@ class ZaloListener:
 
     async def _download_image(self, image_url: str, group_name: str, msg_id: str) -> Optional[str]:
         """Download an image from Zalo and save it locally. Returns the local file path."""
-        if not image_url or not image_url.startswith("http"):
+        if not image_url:
             return None
         try:
             images_dir = Path("data/images") / group_name.replace("/", "_")
             images_dir.mkdir(parents=True, exist_ok=True)
+            safe_id = (msg_id or "unknown").replace("/", "_")[:50]
+
+            if image_url.startswith("blob:"):
+                # blob: URLs can't be fetched — convert via canvas in browser
+                b64 = await self._page.evaluate("""
+                    async (src) => {
+                        const img = document.querySelector(`img[src="${src}"]`);
+                        if (!img) return null;
+                        // Wait for image to load
+                        if (!img.complete) await new Promise(r => { img.onload = r; setTimeout(r, 3000); });
+                        const canvas = document.createElement('canvas');
+                        canvas.width = img.naturalWidth || img.width;
+                        canvas.height = img.naturalHeight || img.height;
+                        if (canvas.width === 0 || canvas.height === 0) return null;
+                        canvas.getContext('2d').drawImage(img, 0, 0);
+                        return canvas.toDataURL('image/png').split(',')[1];
+                    }
+                """, image_url)
+                if not b64:
+                    return None
+                import base64
+                body = base64.b64decode(b64)
+                filepath = images_dir / f"{safe_id}.png"
+                filepath.write_bytes(body)
+                logger.debug(f"Image saved (blob): {filepath}")
+                return str(filepath)
+
+            if not image_url.startswith("http"):
+                return None
 
             # Use page context to download (preserves Zalo auth cookies)
             response = await self._page.request.get(image_url)
@@ -358,7 +442,6 @@ class ZaloListener:
             elif "webp" in content_type:
                 ext = ".webp"
 
-            safe_id = (msg_id or "unknown").replace("/", "_")[:50]
             filename = f"{safe_id}{ext}"
             filepath = images_dir / filename
             filepath.write_bytes(body)
@@ -380,6 +463,9 @@ class ZaloListener:
                 ts = parse_message_time(raw["time_str"], raw.get("date_context")) if raw["time_str"] else datetime.now()
             except Exception:
                 ts = datetime.now()
+            # Truncate to minute precision so same message always produces the same
+            # timestamp across poll cycles — this is critical for the UNIQUE constraint
+            ts = ts.replace(second=0, microsecond=0)
 
             # Download image if present
             image_path = None

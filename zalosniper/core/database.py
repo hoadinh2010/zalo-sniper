@@ -143,15 +143,28 @@ class Database:
 
     async def insert_message(self, msg: Message) -> Optional[int]:
         try:
+            # First check if a message with same group+sender+content exists
+            # within a 10-minute window — this prevents duplicates caused by
+            # Zalo Web re-rendering timestamps slightly differently each poll
+            ts_iso = msg.timestamp.isoformat()
+            async with self._conn.execute(
+                """SELECT id FROM messages
+                   WHERE group_name = ? AND sender = ? AND content = ?
+                     AND abs(julianday(timestamp) - julianday(?)) < (10.0 / 1440.0)
+                   LIMIT 1""",
+                (msg.group_name, msg.sender, msg.content, ts_iso),
+            ) as cur:
+                if await cur.fetchone():
+                    return None  # duplicate within 10-min window
+
             async with self._conn.execute(
                 """INSERT OR IGNORE INTO messages
                    (zalo_message_id, group_name, sender, content, timestamp, image_path)
                    VALUES (?, ?, ?, ?, ?, ?)""",
                 (msg.zalo_message_id, msg.group_name, msg.sender,
-                 msg.content, msg.timestamp.isoformat(), msg.image_path),
+                 msg.content, ts_iso, msg.image_path),
             ) as cur:
                 await self._conn.commit()
-                # rowcount == 0 means IGNORE fired (duplicate); lastrowid unchanged
                 if cur.rowcount == 0:
                     return None
                 return cur.lastrowid if cur.lastrowid else None

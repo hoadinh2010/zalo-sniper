@@ -21,9 +21,17 @@
     </p>
     <button class="btn btn-primary" onclick="startLogin()" id="login-btn">📱 Lấy mã QR đăng nhập</button>
     <div id="qr-container" style="margin-top:16px;display:none">
-      <div style="text-align:center">
-        <img id="qr-image" style="max-width:300px;border-radius:8px;border:1px solid var(--border)" />
-        <p style="color:var(--text-muted);font-size:12px;margin-top:8px" id="qr-status">Đang chờ quét mã QR...</p>
+      <div style="display:flex;align-items:flex-start;gap:24px">
+        <img id="qr-image" style="max-width:220px;border-radius:8px;border:1px solid var(--border);flex-shrink:0" />
+        <div style="padding-top:8px">
+          <p style="font-weight:600;margin-bottom:8px" id="qr-status">Quét mã QR bằng Zalo trên điện thoại...</p>
+          <ol style="color:var(--text-muted);font-size:13px;padding-left:18px;line-height:1.8">
+            <li>Mở app <strong>Zalo</strong> trên điện thoại</li>
+            <li>Vào <strong>Cài đặt</strong> → <strong>Tài khoản & bảo mật</strong></li>
+            <li>Chọn <strong>Quét mã QR</strong></li>
+            <li>Hướng camera vào mã QR bên trái</li>
+          </ol>
+        </div>
       </div>
     </div>
   </div>

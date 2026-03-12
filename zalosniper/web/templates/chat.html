@@ -78,6 +78,11 @@
   .chat-messages::-webkit-scrollbar { width: 4px; }
   .chat-messages::-webkit-scrollbar-track { background: transparent; }
   .chat-messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  /* Image lightbox */
+  .img-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.85); z-index: 9999;
+                 display: flex; align-items: center; justify-content: center; cursor: zoom-out; }
+  .img-overlay img { max-width: 90vw; max-height: 90vh; border-radius: 8px; box-shadow: 0 8px 32px rgba(0,0,0,.5); }
 </style>
 
 <div class="chat-layout">
@@ -232,7 +237,7 @@ function renderMessages(msgs) {
         <div class="msg-col">
           ${showName ? `<div class="msg-sender-name" style="color:${color}">${escHtml(displayName)}</div>` : ''}
           <div class="msg-bubble ${isMe ? 'me-bubble' : 'other'}">
-            ${m.image_path ? `<img src="/images/${m.image_path.replace('data/images/','')}" style="max-width:300px;border-radius:8px;margin-bottom:4px;cursor:pointer;display:block" onclick="window.open(this.src)" onerror="this.style.display='none'">` : ''}
+            ${m.image_path ? `<img src="/images/${m.image_path.replace('data/images/','')}" style="max-width:300px;border-radius:8px;margin-bottom:4px;cursor:pointer;display:block" onclick="previewImg(this.src)" onerror="this.style.display='none'">` : ''}
             ${escHtml(m.content)}
           </div>
           <div class="msg-meta"><span class="msg-time">${time}</span>${processedMark}</div>
@@ -276,6 +281,14 @@ function startAutoRefresh() {
 
 function stopAutoRefresh() {
   if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+}
+
+function previewImg(src) {
+  const ov = document.createElement('div');
+  ov.className = 'img-overlay';
+  ov.innerHTML = `<img src="${src}">`;
+  ov.onclick = () => ov.remove();
+  document.body.appendChild(ov);
 }
 
 document.addEventListener('DOMContentLoaded', loadGroups);

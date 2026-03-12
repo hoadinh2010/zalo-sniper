@@ -57,6 +57,9 @@ function bugActions(a) {
   if (!a.op_work_package_url) {
     btns.push(`<button class="btn btn-sm btn-blue" onclick="createOpTask(${a.id})">Tạo task</button>`);
   }
+  if (a.op_work_package_id) {
+    btns.push(`<label class="btn btn-sm btn-blue" style="cursor:pointer"><input type="file" accept="image/*" multiple hidden onchange="uploadToOp(${a.id},this.files)">📎 Upload</label>`);
+  }
   if (a.pr_url) {
     btns.push(`<a href="${a.pr_url}" target="_blank" class="btn btn-sm btn-blue">PR</a>`);
   }
@@ -114,6 +117,20 @@ function closeOpModal() {
 document.getElementById('op-modal').addEventListener('click', function(e) {
   if (e.target === this) closeOpModal();
 });
+
+async function uploadToOp(analysisId, files) {
+  if (!files || !files.length) return;
+  for (const file of files) {
+    const fd = new FormData();
+    fd.append('file', file);
+    try {
+      const resp = await fetch(`/api/analyses/${analysisId}/upload-to-op`, {method:'POST', body: fd});
+      const data = await resp.json();
+      if (data.ok) toast(`Đã upload ${file.name} lên OP!`);
+      else toast(data.error || 'Lỗi upload', 'error');
+    } catch(e) { toast('Lỗi upload: ' + e.message, 'error'); }
+  }
+}
 
 async function setBugStatus(id, status) {
   const res = await POST(`/api/analyses/${id}/status`, {status});

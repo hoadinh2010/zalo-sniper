@@ -336,6 +336,46 @@ def create_api_router() -> APIRouter:
         )
         return {"ok": True, "op_id": op_id, "op_url": op_url}
 
+    @router.post("/analyses/{analysis_id}/upload-to-op")
+    async def upload_to_op(analysis_id: int, request: Request):
+        """Upload an image file to the OP work package attached to this analysis."""
+        if not _require_auth(request):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        db = request.app.state.db
+        from zalosniper.models.bug_analysis import BugAnalysis
+        analysis = await db.get_bug_analysis(analysis_id)
+        if not analysis or not analysis.op_work_package_id:
+            return JSONResponse({"error": "Bug chưa có OP task"}, status_code=400)
+        # Get OP config for this group
+        groups = await db.get_all_groups()
+        group = next((g for g in groups if g["group_name"] == analysis.group_name), None)
+        if not group:
+            return JSONResponse({"error": "Group not found"}, status_code=404)
+        op_config = await db.get_group_openproject(group["id"])
+        if not op_config or not op_config.get("op_url"):
+            return JSONResponse({"error": "OP chưa cấu hình"}, status_code=400)
+        # Parse multipart file
+        import os, tempfile
+        form = await request.form()
+        file = form.get("file")
+        if not file:
+            return JSONResponse({"error": "No file"}, status_code=400)
+        # Save to temp file then upload
+        content = await file.read()
+        suffix = os.path.splitext(file.filename)[1] or ".jpg"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+        try:
+            from zalosniper.modules.openproject_client import OpenProjectClient
+            client = OpenProjectClient(url=op_config["op_url"], api_key=op_config["op_api_key"])
+            result = await client.upload_attachment(analysis.op_work_package_id, tmp_path)
+            return {"ok": True, "url": result}
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+        finally:
+            os.unlink(tmp_path)
+
     @router.get("/analyses/{analysis_id}/op-info")
     async def get_op_info(analysis_id: int, request: Request):
         """Fetch OpenProject work package info for a bug analysis."""
@@ -421,45 +461,42 @@ def create_api_router() -> APIRouter:
 
     @router.post("/zalo/login")
     async def zalo_login(request: Request):
-        """Launch Playwright, navigate to Zalo Web, capture QR code screenshot."""
+        """Launch a FRESH Playwright session (no old state), navigate to Zalo Web, capture QR screenshot."""
         if not _require_auth(request):
             return JSONResponse({"error": "Unauthorized"}, status_code=401)
         bot_state = request.app.state.bot_state
-        # Don't allow login while bot is running with active Zalo
         if bot_state.get("login_in_progress"):
             return JSONResponse({"error": "Login already in progress"}, status_code=409)
         bot_state["login_in_progress"] = True
         try:
             import base64
+            import os
             from playwright.async_api import async_playwright
             settings = await request.app.state.db.get_all_settings()
             session_dir = settings.get("zalo_session_dir", "zalo_session")
-            import os
             os.makedirs(session_dir, exist_ok=True)
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True)
-                context = await browser.new_context(storage_state=f"{session_dir}/state.json" if os.path.exists(f"{session_dir}/state.json") else None)
-                page = await context.new_page()
-                await page.goto("https://chat.zalo.me", wait_until="networkidle", timeout=30000)
-                await page.wait_for_timeout(3000)
-                # Check if already logged in (no QR code visible)
-                qr_el = await page.query_selector("canvas, .qr-code, [data-id='qr-code'], img[src*='qr']")
-                if not qr_el:
-                    # Check for chat interface elements indicating logged in
-                    chat_el = await page.query_selector("[data-id='conversation-list'], .chat-list, .conv-list")
-                    if chat_el:
-                        await context.storage_state(path=f"{session_dir}/state.json")
-                        await browser.close()
-                        return {"already_logged_in": True}
-                # Take screenshot of the QR area
+            # Keep playwright instance alive (NOT async with) so page survives for polling
+            pw = await async_playwright().start()
+            browser = await pw.chromium.launch(headless=True)
+            # Always create a FRESH context (no storage_state) to force QR code display
+            context = await browser.new_context()
+            page = await context.new_page()
+            await page.goto("https://chat.zalo.me", wait_until="networkidle", timeout=30000)
+            await page.wait_for_timeout(3000)
+            # Try to screenshot just the QR code element, fall back to full page
+            qr_el = await page.query_selector("canvas") or await page.query_selector("[class*='qr']") or await page.query_selector("img[src*='qr']")
+            if qr_el:
+                screenshot = await qr_el.screenshot(type="png")
+            else:
                 screenshot = await page.screenshot(type="png")
-                qr_b64 = base64.b64encode(screenshot).decode()
-                # Save page ref for polling
-                bot_state["login_page"] = page
-                bot_state["login_context"] = context
-                bot_state["login_browser"] = browser
-                bot_state["login_session_dir"] = session_dir
-                return {"qr_image": qr_b64}
+            qr_b64 = base64.b64encode(screenshot).decode()
+            # Save refs for polling — kept alive until login completes or times out
+            bot_state["login_pw"] = pw
+            bot_state["login_page"] = page
+            bot_state["login_context"] = context
+            bot_state["login_browser"] = browser
+            bot_state["login_session_dir"] = session_dir
+            return {"qr_image": qr_b64}
         except Exception as e:
             bot_state["login_in_progress"] = False
             return JSONResponse({"error": str(e)}, status_code=500)
@@ -480,18 +517,24 @@ def create_api_router() -> APIRouter:
                 session_dir = bot_state.get("login_session_dir", "zalo_session")
                 context = bot_state.get("login_context")
                 browser = bot_state.get("login_browser")
+                pw = bot_state.get("login_pw")
+                # Save new session state
                 await context.storage_state(path=f"{session_dir}/state.json")
                 await browser.close()
+                await pw.stop()
                 bot_state.pop("login_page", None)
                 bot_state.pop("login_context", None)
                 bot_state.pop("login_browser", None)
+                bot_state.pop("login_pw", None)
                 bot_state.pop("login_session_dir", None)
                 bot_state["login_in_progress"] = False
                 return {"logged_in": True}
             return {"logged_in": False}
         except Exception as e:
+            # Clean up on error
+            for key in ("login_page", "login_context", "login_browser", "login_pw", "login_session_dir"):
+                bot_state.pop(key, None)
             bot_state["login_in_progress"] = False
-            bot_state.pop("login_page", None)
             return {"error": str(e)}
 
     # --- Notification Rules ---
