@@ -55,6 +55,14 @@ async function loadMapping() {
       <div class="modal-overlay" id="add-repo-modal-${g.id}">
         <div class="modal">
           <div class="modal-title">Thêm GitHub Repo cho "${g.group_name}"</div>
+          <div class="form-group">
+            <label class="form-label">Tìm repo từ GitHub</label>
+            <div class="input-group">
+              <input type="text" id="r-search-${g.id}" class="form-control" placeholder="Tìm theo tên repo..." oninput="searchRepos(${g.id})">
+              <button class="btn btn-ghost btn-sm" onclick="searchRepos(${g.id})">🔍</button>
+            </div>
+            <div id="r-results-${g.id}" style="margin-top:8px;max-height:200px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;display:none"></div>
+          </div>
           <div class="form-group"><label class="form-label">Owner</label><input type="text" id="r-owner-${g.id}" class="form-control" placeholder="myorg"></div>
           <div class="form-group"><label class="form-label">Repo Name</label><input type="text" id="r-name-${g.id}" class="form-control" placeholder="backend"></div>
           <div class="form-group"><label class="form-label">Branch</label><input type="text" id="r-branch-${g.id}" class="form-control" placeholder="main" value="main"></div>
@@ -69,7 +77,58 @@ async function loadMapping() {
   container.innerHTML = html.join('');
 }
 
-function openAddRepo(gid) { document.getElementById(`add-repo-modal-${gid}`).classList.add('open'); }
+function openAddRepo(gid) {
+  document.getElementById(`add-repo-modal-${gid}`).classList.add('open');
+  // Pre-load repos list
+  searchRepos(gid);
+}
+
+let _repoCache = null;
+let _repoSearchTimer = null;
+
+async function searchRepos(gid) {
+  clearTimeout(_repoSearchTimer);
+  _repoSearchTimer = setTimeout(async () => {
+    const q = document.getElementById(`r-search-${gid}`).value.trim();
+    const resultsEl = document.getElementById(`r-results-${gid}`);
+    resultsEl.style.display = 'block';
+    resultsEl.innerHTML = '<div style="padding:10px;color:var(--text-muted)">Đang tải...</div>';
+
+    if (!_repoCache) {
+      const data = await GET('/api/github/repos');
+      if (!data || data.error) {
+        resultsEl.innerHTML = `<div style="padding:10px;color:var(--red)">${data?.error || 'Lỗi tải repo'}</div>`;
+        return;
+      }
+      _repoCache = data;
+    }
+
+    const filtered = q
+      ? _repoCache.filter(r => r.full_name.toLowerCase().includes(q.toLowerCase()))
+      : _repoCache;
+
+    if (!filtered.length) {
+      resultsEl.innerHTML = '<div style="padding:10px;color:var(--text-muted)">Không tìm thấy repo</div>';
+      return;
+    }
+
+    resultsEl.innerHTML = filtered.slice(0, 30).map(r => `
+      <div style="padding:9px 14px;cursor:pointer;border-bottom:1px solid var(--surface2);font-size:13px"
+           onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background=''"
+           onclick="selectRepo(${gid},'${r.owner}','${r.repo_name}','${r.default_branch}')">
+        <strong>${r.full_name}</strong>
+        <span style="color:var(--text-muted);margin-left:8px;font-size:11px">${r.default_branch}</span>
+      </div>`).join('');
+  }, 300);
+}
+
+function selectRepo(gid, owner, name, branch) {
+  document.getElementById(`r-owner-${gid}`).value = owner;
+  document.getElementById(`r-name-${gid}`).value = name;
+  document.getElementById(`r-branch-${gid}`).value = branch;
+  document.getElementById(`r-results-${gid}`).style.display = 'none';
+  document.getElementById(`r-search-${gid}`).value = `${owner}/${name}`;
+}
 
 async function addRepo(gid) {
   const owner = document.getElementById(`r-owner-${gid}`).value.trim();

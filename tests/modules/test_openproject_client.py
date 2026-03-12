@@ -34,7 +34,6 @@ async def test_create_work_package(client):
             project_id="lfc-ticketing-system",
             title="Bug: login crash",
             description="App crash khi login trên Android",
-            status="new",
         )
 
     assert wp_id == 99
@@ -59,7 +58,7 @@ async def test_create_work_package_failure_does_not_raise(client):
 
     with patch("aiohttp.ClientSession", return_value=mock_session_cm):
         result = await client.create_work_package(
-            project_id="lfc-ticketing-system", title="test", description="test", status="new"
+            project_id="lfc-ticketing-system", title="test", description="test"
         )
 
     assert result == (None, None)

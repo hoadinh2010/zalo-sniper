@@ -19,14 +19,12 @@ class OpenProjectClient:
         project_id: str,
         title: str,
         description: str,
-        status: str = "new",
     ) -> Tuple[Optional[int], Optional[str]]:
         payload = {
             "subject": title,
             "description": {"format": "markdown", "raw": description},
             "_links": {
                 "project": {"href": f"/api/v3/projects/{project_id}"},
-                "status": {"href": f"/api/v3/statuses/{status}"},
             },
         }
         url = f"{self._base}/api/v3/work_packages"

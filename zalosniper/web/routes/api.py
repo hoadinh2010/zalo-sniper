@@ -181,6 +181,36 @@ def create_api_router() -> APIRouter:
         )
         return {"ok": True}
 
+    @router.get("/github/repos")
+    async def list_github_repos(request: Request, q: str = ""):
+        if not _require_auth(request):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        settings = await request.app.state.db.get_all_settings()
+        token = settings.get("github_token", "")
+        if not token:
+            return JSONResponse({"error": "GitHub token not configured"}, status_code=400)
+        import aiohttp
+        headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github+json"}
+        repos = []
+        try:
+            async with aiohttp.ClientSession() as session:
+                # Fetch user repos + org repos via /user/repos (includes all accessible)
+                url = "https://api.github.com/user/repos?per_page=100&sort=updated&affiliation=owner,collaborator,organization_member"
+                async with session.get(url, headers=headers) as resp:
+                    if resp.status != 200:
+                        body = await resp.text()
+                        return JSONResponse({"error": f"GitHub API error {resp.status}: {body}"}, status_code=resp.status)
+                    data = await resp.json()
+                    repos = [{"full_name": r["full_name"], "owner": r["owner"]["login"],
+                               "repo_name": r["name"], "default_branch": r["default_branch"]}
+                              for r in data]
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+        if q:
+            q_lower = q.lower()
+            repos = [r for r in repos if q_lower in r["full_name"].lower()]
+        return repos
+
     @router.get("/logs")
     async def get_logs(request: Request, level: str = None, n: int = 100):
         if not _require_auth(request):

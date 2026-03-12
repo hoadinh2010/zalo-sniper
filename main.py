@@ -85,9 +85,7 @@ async def run(
         db=db,
         ai=ai,
         zalo_session_valid_fn=lambda: bot_state.get("zalo_running", False),
-        on_callback=lambda aid, action, uid: asyncio.create_task(
-            orchestrator_ref[0].handle_callback(aid, action, uid)
-        ),
+        on_callback=lambda aid, action, uid: orchestrator_ref[0].handle_callback(aid, action, uid),
     )
 
     orchestrator = Orchestrator(config, db, bus, ai, code_agent, github, telegram)
