@@ -1,10 +1,10 @@
 # tests/modules/test_zalo_listener.py
 import asyncio
 import pytest
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import MagicMock, AsyncMock, patch
 from zalosniper.core.event_bus import EventBus, Event
-from zalosniper.modules.zalo_listener import ZaloListener, parse_message_time
+from zalosniper.modules.zalo_listener import ZaloListener, parse_message_time, _parse_date_from_divider
 
 
 def test_parse_message_time_today():
@@ -17,7 +17,6 @@ def test_parse_message_time_today():
 
 def test_parse_message_time_yesterday():
     result = parse_message_time("Hôm qua 09:15")
-    from datetime import timedelta
     expected_date = (datetime.now() - timedelta(days=1)).date()
     assert result.date() == expected_date
     assert result.hour == 9
@@ -25,6 +24,32 @@ def test_parse_message_time_yesterday():
 
 def test_parse_message_time_date():
     result = parse_message_time("10/03 08:00")
+    assert result.month == 3
+    assert result.day == 10
+
+
+def test_parse_message_time_with_date_context():
+    """HH:MM with a date_context should use that date, not today."""
+    yesterday = (datetime.now() - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    result = parse_message_time("20:05", date_context=yesterday)
+    assert result.date() == yesterday.date()
+    assert result.hour == 20
+    assert result.minute == 5
+
+
+def test_parse_date_from_divider_hom_qua():
+    result = _parse_date_from_divider("Hôm qua")
+    expected = (datetime.now() - timedelta(days=1)).date()
+    assert result.date() == expected
+
+
+def test_parse_date_from_divider_hom_nay():
+    result = _parse_date_from_divider("Hôm nay")
+    assert result.date() == datetime.now().date()
+
+
+def test_parse_date_from_divider_date_format():
+    result = _parse_date_from_divider("Thứ hai, 10/03")
     assert result.month == 3
     assert result.day == 10
 

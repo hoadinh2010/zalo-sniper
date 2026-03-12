@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
@@ -15,6 +16,7 @@ from zalosniper.modules.zalo_selectors import (
     GROUP_LIST_ITEM, GROUP_NAME_SELECTOR,
     MESSAGE_ITEM, MESSAGE_SENDER, MESSAGE_CONTENT,
     MESSAGE_TIME, MESSAGE_FRAME, MESSAGE_ID_ATTR, MESSAGE_ME_CLASS,
+    MESSAGE_DATE_DIVIDER,
 )
 
 logger = logging.getLogger(__name__)
@@ -22,8 +24,34 @@ logger = logging.getLogger(__name__)
 AlertFn = Callable[[str], None]
 
 
-def parse_message_time(time_str: str) -> datetime:
-    """Parse Zalo Web time formats into datetime."""
+def _parse_date_from_divider(divider_text: str) -> Optional[datetime]:
+    """Parse date from a Zalo chat divider like 'Hôm qua', 'Hôm nay', '10/03'."""
+    text = divider_text.strip()
+    now = datetime.now()
+
+    if "Hôm nay" in text:
+        return now.replace(hour=0, minute=0, second=0, microsecond=0)
+    if "Hôm qua" in text:
+        return (now - timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    # Format: "10/03" or "Thứ ..., 10/03"
+    m = re.search(r"(\d{1,2})/(\d{1,2})", text)
+    if m:
+        day, month = int(m.group(1)), int(m.group(2))
+        candidate = now.replace(month=month, day=day, hour=0, minute=0, second=0, microsecond=0)
+        if candidate > now:
+            candidate = candidate.replace(year=now.year - 1)
+        return candidate
+    return None
+
+
+def parse_message_time(time_str: str, date_context: Optional[datetime] = None) -> datetime:
+    """Parse Zalo Web time formats into datetime.
+
+    Args:
+        time_str: The time string from the message element (e.g. "17:30", "Hôm qua 20:01")
+        date_context: Date from the nearest preceding date divider, used when
+                      time_str is just "HH:MM" without a date prefix.
+    """
     now = datetime.now()
     time_str = time_str.strip()
 
@@ -38,13 +66,14 @@ def parse_message_time(time_str: str) -> datetime:
         day, month = map(int, parts[0].split("/"))
         h, m = map(int, parts[1].split(":"))
         candidate = now.replace(month=month, day=day, hour=h, minute=m, second=0, microsecond=0)
-        # Guard against year rollover (e.g., Dec 31 message parsed in Jan)
         if candidate > now:
             candidate = candidate.replace(year=now.year - 1)
         return candidate
 
-    # Format: "HH:MM" (today)
+    # Format: "HH:MM" — use date_context if available, otherwise assume today
     h, m = map(int, time_str.split(":"))
+    if date_context:
+        return date_context.replace(hour=h, minute=m, second=0, microsecond=0)
     return now.replace(hour=h, minute=m, second=0, microsecond=0)
 
 
@@ -237,24 +266,49 @@ class ZaloListener:
         await search_box.press("Escape")
 
     async def _extract_messages_from_dom(self) -> List[dict]:
-        """Extract raw message data from the current group page DOM."""
+        """Extract raw message data from the current group page DOM.
+
+        Handles two Zalo Web quirks:
+        1. Sender name only appears on the first message in a consecutive group
+           from the same person — we track last_sender to fill gaps.
+        2. Date dividers (e.g. "Hôm qua", "10/03") appear as separate elements
+           between messages — we track current_date to assign correct dates.
+        """
         raw = []
-        items = await self._page.query_selector_all(MESSAGE_ITEM)
-        for item in items:
+        last_sender = None
+        current_date = None  # date context from dividers
+
+        # Query both messages and dividers in DOM order
+        children = await self._page.query_selector_all(
+            f"{MESSAGE_ITEM}, {MESSAGE_DATE_DIVIDER}"
+        )
+        for child in children:
             try:
-                classes = await item.get_attribute("class") or ""
+                classes = await child.get_attribute("class") or ""
+
+                # Check if this is a date divider
+                if "chat-divider" in classes:
+                    divider_text = (await child.inner_text()).strip()
+                    current_date = _parse_date_from_divider(divider_text)
+                    continue
+
+                # It's a message item
                 is_me = MESSAGE_ME_CLASS in classes.split()
 
-                sender_el = await item.query_selector(MESSAGE_SENDER)
-                content_el = await item.query_selector(MESSAGE_CONTENT)
-                time_el = await item.query_selector(MESSAGE_TIME)
-                frame_el = await item.query_selector(MESSAGE_FRAME)
+                sender_el = await child.query_selector(MESSAGE_SENDER)
+                content_el = await child.query_selector(MESSAGE_CONTENT)
+                time_el = await child.query_selector(MESSAGE_TIME)
+                frame_el = await child.query_selector(MESSAGE_FRAME)
                 msg_id = (await frame_el.get_attribute(MESSAGE_ID_ATTR)) if frame_el else None
 
                 if is_me:
                     sender = "me"
                 else:
-                    sender = (await sender_el.inner_text()).strip() if sender_el else "Unknown"
+                    if sender_el:
+                        sender = (await sender_el.inner_text()).strip()
+                        last_sender = sender
+                    else:
+                        sender = last_sender or "Unknown"
 
                 content = (await content_el.inner_text()).strip() if content_el else ""
                 time_str = (await time_el.inner_text()).strip() if time_el else ""
@@ -264,6 +318,7 @@ class ZaloListener:
                         "sender": sender,
                         "content": content,
                         "time_str": time_str,
+                        "date_context": current_date,
                         "zalo_message_id": msg_id,
                     })
             except Exception as e:
@@ -279,7 +334,7 @@ class ZaloListener:
 
         for raw in raw_messages:
             try:
-                ts = parse_message_time(raw["time_str"]) if raw["time_str"] else datetime.now()
+                ts = parse_message_time(raw["time_str"], raw.get("date_context")) if raw["time_str"] else datetime.now()
             except Exception:
                 ts = datetime.now()
 

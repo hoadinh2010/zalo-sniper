@@ -196,11 +196,11 @@ async function openGroup(name, days) {
   let lastDate = null;
   let html = '';
   let lastSender = null;
-  const me = msgs.length > 0 ? null : null; // no "me" concept — all are other members
-
   for (const m of msgs) {
     const dt = m.timestamp ? m.timestamp.split(' ')[0] : '—';
     const time = m.timestamp ? m.timestamp.split(' ')[1]?.slice(0,5) : '';
+    const isMe = m.sender === 'me';
+    const displayName = isMe ? 'Tôi' : m.sender;
 
     if (dt !== lastDate) {
       lastDate = dt;
@@ -211,17 +211,17 @@ async function openGroup(name, days) {
 
     const showName = m.sender !== lastSender;
     lastSender = m.sender;
-    const color = senderColor(m.sender);
+    const color = isMe ? '#6366f1' : senderColor(m.sender);
     const processedMark = m.processed ? ' <span class="msg-processed">✓ đã xử lý</span>' : '';
 
     html += `
-      <div class="msg-group">
+      <div class="msg-group${isMe ? ' me' : ''}">
         <div class="msg-sender-avatar" style="background:${color};${showName ? '' : 'visibility:hidden'}">
-          ${initials(m.sender)}
+          ${initials(displayName)}
         </div>
         <div class="msg-col">
-          ${showName ? `<div class="msg-sender-name" style="color:${color}">${escHtml(m.sender)}</div>` : ''}
-          <div class="msg-bubble other">${escHtml(m.content)}</div>
+          ${showName ? `<div class="msg-sender-name" style="color:${color}">${escHtml(displayName)}</div>` : ''}
+          <div class="msg-bubble ${isMe ? 'me-bubble' : 'other'}">${escHtml(m.content)}</div>
           <div class="msg-meta"><span class="msg-time">${time}</span>${processedMark}</div>
         </div>
       </div>`;

@@ -17,3 +17,4 @@ MESSAGE_TIME = ".card-send-time__sendTime"                 # timestamp element
 MESSAGE_FRAME = "[data-component='message-content-view']"  # wrapper holding data-qid
 MESSAGE_ID_ATTR = "data-qid"                               # unique message ID attribute
 MESSAGE_ME_CLASS = "me"                                    # class added to sent-by-me chat-items
+MESSAGE_DATE_DIVIDER = ".chat-divider"                     # date divider between message groups
