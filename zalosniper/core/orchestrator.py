@@ -123,29 +123,11 @@ class Orchestrator:
         if not is_bug:
             return
 
-        # Select repo — skip AI call if only one repo configured
-        if len(group_config.repos) == 1:
-            r = group_config.repos[0]
-            owner, name, reason = r.owner, r.name, "only_repo"
-        else:
-            try:
-                owner, name, reason = await self._ai.select_repo(messages, group_config.repos)
-            except Exception as e:
-                logger.error(f"AI select_repo failed for group {group_name!r}: {e}")
-                await self._telegram.send_message(
-                    group_config.telegram_chat_id,
-                    f"AI gap loi khi chon repo phu hop voi nhom [{group_name}]: {e}",
-                )
-                return
-
-        # Save analysis record (no code analysis yet — waiting for user approval)
+        # Save analysis record without repo — repo selection happens when user presses "Xử lý task"
         analysis = BugAnalysis(
             id=None,
             message_ids=[m.id for m in messages],
             group_name=group_name,
-            repo_owner=owner,
-            repo_name=name,
-            repo_selection_reason=reason,
             claude_summary=summary,
         )
         analysis_id = await self._db.insert_bug_analysis(analysis)
@@ -166,8 +148,11 @@ class Orchestrator:
             await self._handle_reject(analysis_id, user_id)
         elif action == "task":
             await self._handle_task_only(analysis_id, user_id)
+        elif action == "process":
+            await self._handle_process(analysis_id, user_id)
 
     async def _handle_approve(self, analysis_id: int, user_id: int) -> None:
+        """Full approval: code analysis + OpenProject task + PR (repo must already be selected)."""
         transitioned = await self._db.transition_status(
             analysis_id, BugStatus.PENDING, BugStatus.APPROVED, approved_by=user_id
         )
@@ -177,6 +162,12 @@ class Orchestrator:
 
         analysis = await self._db.get_bug_analysis(analysis_id)
         group_config = self._config.get_group(analysis.group_name)
+        if not analysis.repo_name:
+            await self._telegram.send_message(
+                group_config.telegram_chat_id,
+                f"Bug #{analysis_id}: chua co repo duoc chon — hay dung 'Xu ly task' sau khi tao task.",
+            )
+            return
         repo_config = next(r for r in group_config.repos if r.name == analysis.repo_name)
 
         await self._telegram.send_message(
@@ -244,7 +235,6 @@ class Orchestrator:
                     f"**Root cause:** {root_cause}\n\n"
                     f"**Đề xuất fix:** {proposed_fix}"
                 ),
-                status="new",
             )
         except Exception as e:
             logger.error(f"OpenProject create_work_package failed: {e}")
@@ -314,7 +304,7 @@ class Orchestrator:
         await self._telegram.send_message(group_config.telegram_chat_id, f"Bug #{analysis_id} da bi reject.")
 
     async def _handle_task_only(self, analysis_id: int, user_id: int) -> None:
-        """Create OpenProject issue only — no code analysis, no PR."""
+        """Create OpenProject task only — then offer 'Xử lý task' button for code fix."""
         transitioned = await self._db.transition_status(
             analysis_id, BugStatus.PENDING, BugStatus.TASK_ONLY, approved_by=user_id
         )
@@ -329,17 +319,151 @@ class Orchestrator:
                 project_id=op.project_id,
                 title=f"Bug: {analysis.claude_summary}",
                 description=f"**Tóm tắt từ Zalo:** {analysis.claude_summary}",
-                status="new",
             )
             await self._db.update_bug_analysis_status(
                 analysis_id, BugStatus.TASK_ONLY,
                 op_work_package_id=op_id, op_work_package_url=op_url,
             )
-            msg = f"OpenProject task da tao: {op_url}" if op_url else "Tao task that bai."
+            task_line = f"\nOpenProject: {op_url}" if op_url else ""
+            await self._telegram.send_process_button(
+                chat_id=group_config.telegram_chat_id,
+                analysis_id=analysis_id,
+                text=f"✅ Task #{analysis_id} da tao.{task_line}\n\nNhan 'Xu ly task' de bot tu dong fix code.",
+            )
         except Exception as e:
             logger.error(f"Task only failed for analysis {analysis_id}: {e}")
-            msg = f"Loi khi tao OpenProject task: {e}"
-        await self._telegram.send_message(group_config.telegram_chat_id, msg)
+            await self._telegram.send_message(group_config.telegram_chat_id, f"Loi khi tao OpenProject task: {e}")
+
+    async def _handle_process(self, analysis_id: int, user_id: int) -> None:
+        """Select repo, analyze root cause, and create PR — triggered after task creation."""
+        analysis = await self._db.get_bug_analysis(analysis_id)
+        group_config = self._config.get_group(analysis.group_name)
+
+        await self._telegram.send_message(
+            group_config.telegram_chat_id,
+            f"Dang chon repo va phan tich Bug #{analysis_id}...",
+        )
+
+        # Select repo
+        repos = group_config.repos
+        if not repos:
+            await self._telegram.send_message(
+                group_config.telegram_chat_id,
+                f"Bug #{analysis_id}: nhom [{analysis.group_name}] chua co repo nao duoc cau hinh.",
+            )
+            return
+
+        if len(repos) == 1:
+            r = repos[0]
+            owner, name = r.owner, r.name
+        else:
+            try:
+                messages = await self._db.get_recent_messages(analysis.group_name, limit=20, within_hours=6)
+                owner, name, _ = await self._ai.select_repo(messages, repos)
+            except Exception as e:
+                logger.error(f"AI select_repo failed for analysis {analysis_id}: {e}")
+                await self._telegram.send_message(
+                    group_config.telegram_chat_id,
+                    f"AI gap loi khi chon repo cho Bug #{analysis_id}: {e}",
+                )
+                return
+
+        await self._db.update_bug_analysis_status(
+            analysis_id, BugStatus.TASK_ONLY,
+            repo_owner=owner, repo_name=name,
+        )
+        analysis.repo_owner = owner
+        analysis.repo_name = name
+        repo_config = next(r for r in repos if r.name == name)
+
+        if self._config.dry_run:
+            await self._telegram.send_message(
+                group_config.telegram_chat_id, "Dry run — khong thay doi code."
+            )
+            return
+
+        # Clone repo and analyze root cause
+        try:
+            repo_dir = await self._code_agent.clone_or_pull(
+                owner, name, repo_config.branch, self._config.github_token
+            )
+            keywords = (analysis.claude_summary or "").split() + [name]
+            relevant = find_relevant_files(repo_dir, keywords)
+            code_context = self._code_agent.read_files_for_context(relevant)
+        except Exception as e:
+            logger.error(f"CodeAgent error for analysis {analysis_id}: {e}")
+            code_context = ""
+
+        try:
+            context_messages = await self._db.get_recent_messages(analysis.group_name, limit=20, within_hours=6)
+            root_analysis = await _call_with_retry(
+                lambda: self._ai.analyze_root_cause(context_messages, code_context),
+                self._db, analysis_id,
+                alert_fn=lambda msg: asyncio.create_task(
+                    self._telegram.send_message(group_config.telegram_chat_id, msg)
+                ),
+            )
+            root_cause = root_analysis.get("root_cause", "")
+            proposed_fix = root_analysis.get("proposed_fix_description", "")
+            await self._db.update_bug_analysis_status(
+                analysis_id, BugStatus.APPROVED,
+                root_cause=root_cause, proposed_fix=proposed_fix,
+            )
+            analysis.root_cause = root_cause
+            analysis.proposed_fix = proposed_fix
+        except Exception as e:
+            logger.error(f"Root cause analysis failed for analysis {analysis_id}: {e}")
+            await self._telegram.send_message(
+                group_config.telegram_chat_id,
+                f"AI khong the phan tich root cause cho Bug #{analysis_id}: {e}",
+            )
+            return
+
+        # Generate patch and create PR
+        pr_url, pr_number = None, None
+        try:
+            patch = await self._ai.generate_patch(root_cause, code_context)
+            branch_name = f"fix/bug-{analysis_id}"
+            patch_ok = await self._code_agent.apply_patch(patch, repo_dir)
+            if patch_ok:
+                push_ok = await self._code_agent.create_branch_and_push(
+                    repo_dir, branch_name,
+                    f"fix: bug-{analysis_id} from ZaloSniper",
+                    self._config.github_token,
+                    owner, name,
+                )
+                if push_ok:
+                    pr_url, pr_number = self._github.create_pull_request(
+                        owner=owner, repo_name=name,
+                        branch=branch_name, base=repo_config.branch,
+                        title=f"fix: {analysis.claude_summary or f'Bug {analysis_id}'}",
+                        body=(
+                            f"**Root cause:** {root_cause}\n\n"
+                            f"**Fix:** {proposed_fix}\n\n"
+                            + (f"OpenProject: {analysis.op_work_package_url}" if analysis.op_work_package_url else "")
+                        ),
+                        enabled=self._config.github_pr_enabled,
+                    )
+        except Exception as e:
+            logger.error(f"Patch/PR creation failed for analysis {analysis_id}: {e}")
+            await self._telegram.send_message(
+                group_config.telegram_chat_id,
+                f"Khong the tao patch/PR cho Bug #{analysis_id}: {e}\n"
+                f"Vui long fix thu cong dua tren root cause o tren.",
+            )
+
+        await self._db.update_bug_analysis_status(
+            analysis_id, BugStatus.DONE,
+            pr_url=pr_url, pr_number=pr_number,
+        )
+
+        parts = [f"Bug #{analysis_id} da xu ly xong:"]
+        parts.append(f"Root cause: {root_cause}")
+        if pr_url:
+            parts.append(f"PR: {pr_url}")
+        else:
+            parts.append("(Chua tao duoc PR tu dong — vui long fix thu cong)")
+        await self._telegram.send_message(group_config.telegram_chat_id, "\n".join(parts))
 
     async def run_timeout_scheduler(self) -> None:
         """Background task: expire pending analyses older than 30 minutes."""

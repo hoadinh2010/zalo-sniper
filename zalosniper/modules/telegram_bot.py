@@ -21,9 +21,10 @@ def format_bug_message(analysis: BugAnalysis) -> str:
     lines = [
         f"🐛 *Bug phát hiện từ Group: {analysis.group_name}*",
         "",
-        f"*Repo:* `{analysis.repo_owner}/{analysis.repo_name}`",
         f"*Tóm tắt:* {analysis.claude_summary or 'N/A'}",
     ]
+    if analysis.repo_owner and analysis.repo_name:
+        lines.insert(2, f"*Repo:* `{analysis.repo_owner}/{analysis.repo_name}`")
     if analysis.root_cause:
         lines += ["", f"*Root cause:* {analysis.root_cause}"]
     if analysis.proposed_fix:
@@ -89,15 +90,27 @@ class TelegramBot:
         text = format_bug_message(analysis)
         keyboard = InlineKeyboardMarkup([
             [
-                InlineKeyboardButton("✅ Approve Fix", callback_data=f"approve:{analysis.id}"),
-                InlineKeyboardButton("❌ Reject", callback_data=f"reject:{analysis.id}"),
-                InlineKeyboardButton("📋 Task Only", callback_data=f"task:{analysis.id}"),
+                InlineKeyboardButton("📋 Tạo task", callback_data=f"task:{analysis.id}"),
+                InlineKeyboardButton("❌ Bỏ qua", callback_data=f"reject:{analysis.id}"),
             ]
         ])
         msg = await self._app.bot.send_message(
             chat_id=chat_id, text=text, parse_mode="Markdown", reply_markup=keyboard
         )
         return msg.message_id
+
+    async def send_process_button(self, chat_id: int, analysis_id: int, text: str) -> Optional[int]:
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔧 Xử lý task (auto fix code)", callback_data=f"process:{analysis_id}")]
+        ])
+        try:
+            msg = await self._app.bot.send_message(
+                chat_id=chat_id, text=text, reply_markup=keyboard
+            )
+            return msg.message_id
+        except Exception as e:
+            logger.error(f"Failed to send process button to {chat_id}: {e}")
+            return None
 
     async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
