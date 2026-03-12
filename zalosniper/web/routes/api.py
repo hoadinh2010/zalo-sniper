@@ -211,6 +211,29 @@ def create_api_router() -> APIRouter:
             repos = [r for r in repos if q_lower in r["full_name"].lower()]
         return repos
 
+    @router.get("/chat")
+    async def list_chat_groups(request: Request):
+        if not _require_auth(request):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        groups = await request.app.state.db.get_all_groups()
+        return groups
+
+    @router.get("/chat/{group_name}")
+    async def get_chat_messages(group_name: str, request: Request, days: int = 7, limit: int = 500):
+        if not _require_auth(request):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        messages = await request.app.state.db.get_all_messages(group_name, days=days, limit=limit)
+        return [
+            {
+                "id": m.id,
+                "sender": m.sender,
+                "content": m.content,
+                "timestamp": m.timestamp.strftime("%Y-%m-%d %H:%M:%S") if m.timestamp else None,
+                "processed": m.processed,
+            }
+            for m in reversed(messages)  # oldest first for chat display
+        ]
+
     @router.get("/logs")
     async def get_logs(request: Request, level: str = None, n: int = 100):
         if not _require_auth(request):

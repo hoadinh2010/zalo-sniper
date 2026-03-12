@@ -39,6 +39,12 @@ def create_pages_router() -> APIRouter:
             return RedirectResponse("/")
         return request.app.state.templates.TemplateResponse("mapping.html", {"request": request, "page": "mapping"})
 
+    @router.get("/chat", response_class=HTMLResponse)
+    async def chat(request: Request):
+        if not _authed(request):
+            return RedirectResponse("/")
+        return request.app.state.templates.TemplateResponse("chat.html", {"request": request, "page": "chat"})
+
     @router.get("/logs", response_class=HTMLResponse)
     async def logs(request: Request):
         if not _authed(request):
