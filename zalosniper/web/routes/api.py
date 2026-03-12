@@ -193,6 +193,33 @@ def create_api_router() -> APIRouter:
         )
         return {"ok": True}
 
+    @router.post("/groups/{group_id}/openproject/test")
+    async def test_openproject(group_id: int, request: Request):
+        if not _require_auth(request):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        body = await request.json()
+        op_url = body.get("op_url", "").rstrip("/")
+        op_api_key = body.get("op_api_key", "")
+        op_project_id = body.get("op_project_id", "")
+        if not op_url or not op_api_key or not op_project_id:
+            return JSONResponse({"error": "Thiếu thông tin"}, status_code=400)
+        import aiohttp
+        import base64
+        auth = base64.b64encode(f"apikey:{op_api_key}".encode()).decode()
+        headers = {"Authorization": f"Basic {auth}", "Content-Type": "application/json"}
+        try:
+            async with aiohttp.ClientSession() as session:
+                url = f"{op_url}/api/v3/projects/{op_project_id}"
+                async with session.get(url, headers=headers) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return {"ok": True, "project_name": data.get("name", op_project_id)}
+                    else:
+                        body_text = await resp.text()
+                        return JSONResponse({"error": f"HTTP {resp.status}: {body_text[:200]}"}, status_code=resp.status)
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+
     @router.get("/github/repos")
     async def list_github_repos(request: Request, q: str = "", test_token: str = ""):
         if not _require_auth(request):
@@ -374,6 +401,221 @@ def create_api_router() -> APIRouter:
             }
             for m in reversed(messages)  # oldest first for chat display
         ]
+
+    @router.get("/zalo/status")
+    async def zalo_status(request: Request):
+        if not _require_auth(request):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        bot_state = request.app.state.bot_state
+        import os
+        settings = await request.app.state.db.get_all_settings()
+        session_dir = settings.get("zalo_session_dir", "zalo_session")
+        state_file = os.path.join(session_dir, "state.json")
+        session_exists = os.path.exists(state_file)
+        return {
+            "zalo_running": bot_state.get("zalo_running", False),
+            "session_dir": session_dir,
+            "session_exists": session_exists,
+            "session_file_size": os.path.getsize(state_file) if session_exists else 0,
+        }
+
+    @router.post("/zalo/login")
+    async def zalo_login(request: Request):
+        """Launch Playwright, navigate to Zalo Web, capture QR code screenshot."""
+        if not _require_auth(request):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        bot_state = request.app.state.bot_state
+        # Don't allow login while bot is running with active Zalo
+        if bot_state.get("login_in_progress"):
+            return JSONResponse({"error": "Login already in progress"}, status_code=409)
+        bot_state["login_in_progress"] = True
+        try:
+            import base64
+            from playwright.async_api import async_playwright
+            settings = await request.app.state.db.get_all_settings()
+            session_dir = settings.get("zalo_session_dir", "zalo_session")
+            import os
+            os.makedirs(session_dir, exist_ok=True)
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True)
+                context = await browser.new_context(storage_state=f"{session_dir}/state.json" if os.path.exists(f"{session_dir}/state.json") else None)
+                page = await context.new_page()
+                await page.goto("https://chat.zalo.me", wait_until="networkidle", timeout=30000)
+                await page.wait_for_timeout(3000)
+                # Check if already logged in (no QR code visible)
+                qr_el = await page.query_selector("canvas, .qr-code, [data-id='qr-code'], img[src*='qr']")
+                if not qr_el:
+                    # Check for chat interface elements indicating logged in
+                    chat_el = await page.query_selector("[data-id='conversation-list'], .chat-list, .conv-list")
+                    if chat_el:
+                        await context.storage_state(path=f"{session_dir}/state.json")
+                        await browser.close()
+                        return {"already_logged_in": True}
+                # Take screenshot of the QR area
+                screenshot = await page.screenshot(type="png")
+                qr_b64 = base64.b64encode(screenshot).decode()
+                # Save page ref for polling
+                bot_state["login_page"] = page
+                bot_state["login_context"] = context
+                bot_state["login_browser"] = browser
+                bot_state["login_session_dir"] = session_dir
+                return {"qr_image": qr_b64}
+        except Exception as e:
+            bot_state["login_in_progress"] = False
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    @router.get("/zalo/login-status")
+    async def zalo_login_status(request: Request):
+        """Poll to check if QR login completed."""
+        if not _require_auth(request):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        bot_state = request.app.state.bot_state
+        page = bot_state.get("login_page")
+        if not page:
+            return {"error": "No login in progress"}
+        try:
+            # Check if logged in by looking for chat interface
+            chat_el = await page.query_selector("[data-id='conversation-list'], .chat-list, .conv-list")
+            if chat_el:
+                session_dir = bot_state.get("login_session_dir", "zalo_session")
+                context = bot_state.get("login_context")
+                browser = bot_state.get("login_browser")
+                await context.storage_state(path=f"{session_dir}/state.json")
+                await browser.close()
+                bot_state.pop("login_page", None)
+                bot_state.pop("login_context", None)
+                bot_state.pop("login_browser", None)
+                bot_state.pop("login_session_dir", None)
+                bot_state["login_in_progress"] = False
+                return {"logged_in": True}
+            return {"logged_in": False}
+        except Exception as e:
+            bot_state["login_in_progress"] = False
+            bot_state.pop("login_page", None)
+            return {"error": str(e)}
+
+    # --- Notification Rules ---
+
+    @router.get("/groups/{group_id}/notifications")
+    async def get_notifications(group_id: int, request: Request):
+        if not _require_auth(request):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        return await request.app.state.db.get_notification_rules(group_id)
+
+    @router.put("/groups/{group_id}/notifications")
+    async def set_notifications(group_id: int, request: Request):
+        if not _require_auth(request):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        body = await request.json()
+        await request.app.state.db.upsert_notification_rules(
+            group_id,
+            int(body.get("auto_create_op_task", 1)),
+            int(body.get("notify_telegram", 1)),
+            body.get("min_severity", "all"),
+        )
+        return {"ok": True}
+
+    # --- Assignment Rules ---
+
+    @router.get("/groups/{group_id}/assignment-rules")
+    async def get_assignment_rules(group_id: int, request: Request):
+        if not _require_auth(request):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        return await request.app.state.db.get_assignment_rules(group_id)
+
+    @router.post("/groups/{group_id}/assignment-rules")
+    async def add_assignment_rule(group_id: int, request: Request):
+        if not _require_auth(request):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        body = await request.json()
+        rid = await request.app.state.db.add_assignment_rule(
+            group_id, body["keyword_pattern"],
+            int(body.get("op_assignee_id", 0)),
+            body.get("op_assignee_name", ""),
+        )
+        return {"id": rid}
+
+    @router.delete("/assignment-rules/{rule_id}")
+    async def delete_assignment_rule_endpoint(rule_id: int, request: Request):
+        if not _require_auth(request):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        ok = await request.app.state.db.delete_assignment_rule(rule_id)
+        return {"ok": ok}
+
+    # --- Zalo Accounts ---
+
+    @router.get("/zalo/accounts")
+    async def list_zalo_accounts(request: Request):
+        if not _require_auth(request):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        return await request.app.state.db.get_all_zalo_accounts()
+
+    @router.post("/zalo/accounts")
+    async def add_zalo_account(request: Request):
+        if not _require_auth(request):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        body = await request.json()
+        name = body.get("name", "").strip()
+        session_dir = body.get("session_dir", "").strip()
+        if not name or not session_dir:
+            return JSONResponse({"error": "Name and session_dir required"}, status_code=400)
+        aid = await request.app.state.db.add_zalo_account(name, session_dir)
+        return {"id": aid}
+
+    @router.delete("/zalo/accounts/{account_id}")
+    async def delete_zalo_account_endpoint(account_id: int, request: Request):
+        if not _require_auth(request):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        ok = await request.app.state.db.delete_zalo_account(account_id)
+        return {"ok": ok}
+
+    # --- Webhooks ---
+
+    @router.post("/webhooks/openproject")
+    async def openproject_webhook(request: Request):
+        body = await request.json()
+        settings = await request.app.state.db.get_all_settings()
+        secret = settings.get("webhook_secret", "")
+        if secret:
+            req_secret = request.headers.get("X-Webhook-Secret", "")
+            if req_secret != secret:
+                return JSONResponse({"error": "Invalid secret"}, status_code=403)
+        wp = body.get("work_package", {})
+        wp_id = wp.get("id")
+        if not wp_id:
+            return {"ok": True, "skipped": "no work_package id"}
+        db = request.app.state.db
+        analysis = await db.get_analysis_by_op_id(wp_id)
+        if not analysis:
+            return {"ok": True, "skipped": "no matching analysis"}
+        new_status_name = wp.get("_links", {}).get("status", {}).get("title", "").lower()
+        from zalosniper.models.bug_analysis import BugStatus
+        status_map = {"closed": BugStatus.DONE, "resolved": BugStatus.DONE, "rejected": BugStatus.REJECTED}
+        new_bug_status = status_map.get(new_status_name)
+        if new_bug_status:
+            await db.update_bug_analysis_status(analysis.id, new_bug_status)
+            logger.info(f"Webhook: Bug #{analysis.id} status -> {new_bug_status.value}")
+            bot_state = request.app.state.bot_state
+            telegram = bot_state.get("telegram")
+            config = bot_state.get("config")
+            if telegram and config:
+                group_config = config.get_group(analysis.group_name)
+                if group_config:
+                    await telegram.send_message(
+                        group_config.telegram_chat_id,
+                        f"OpenProject: Bug #{analysis.id} -> {new_status_name}\n({analysis.claude_summary or ''})",
+                    )
+        return {"ok": True, "updated": analysis.id}
+
+    # --- Analytics ---
+
+    @router.get("/analytics")
+    async def get_analytics(request: Request, period: int = 7):
+        if not _require_auth(request):
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        if period not in (7, 30, 90):
+            period = 7
+        return await request.app.state.db.get_analytics(period)
 
     @router.get("/logs")
     async def get_logs(request: Request, level: str = None, n: int = 100):

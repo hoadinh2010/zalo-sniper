@@ -49,8 +49,17 @@ async function loadMapping() {
             <label class="form-label">Project ID / Slug</label>
             <input type="text" class="form-control" id="op-proj-${g.id}" value="${op.op_project_id||''}" placeholder="my-project">
           </div>
-          <button class="btn btn-primary btn-sm" onclick="saveOP(${g.id})">💾 Lưu OpenProject</button>
+          <div style="display:flex;gap:8px;align-items:center">
+            <button class="btn btn-primary btn-sm" onclick="saveOP(${g.id})">💾 Lưu OpenProject</button>
+            <button class="btn btn-ghost btn-sm" onclick="testOP(${g.id})">🔍 Test kết nối</button>
+            <span id="op-status-${g.id}" style="font-size:12px"></span>
+          </div>
         </div>
+        <div class="card-header" style="border-top:1px solid var(--border);border-bottom:none;margin-top:0">
+          <span class="card-title">Auto-assign Rules</span>
+          <button class="btn btn-primary btn-sm" onclick="addRule(${g.id})">+ Thêm rule</button>
+        </div>
+        <div style="padding:0 20px 20px" id="rules-${g.id}"><p style="color:var(--text-muted);font-size:12px">Đang tải...</p></div>
       </div>
       <div class="modal-overlay" id="add-repo-modal-${g.id}">
         <div class="modal">
@@ -96,6 +105,8 @@ async function loadMapping() {
       </div>`;
   }));
   container.innerHTML = html.join('');
+  // Load assignment rules for each group
+  groups.forEach(g => loadRules(g.id));
 }
 
 let _ghConnected = null; // cached GitHub connection status
@@ -222,6 +233,56 @@ async function saveOP(gid) {
   const resp = await PUT(`/api/groups/${gid}/openproject`, body);
   if (resp?.ok) toast('Đã lưu OpenProject!');
   else toast('Lỗi khi lưu', 'error');
+}
+
+async function loadRules(gid) {
+  const rules = await GET(`/api/groups/${gid}/assignment-rules`) || [];
+  const el = document.getElementById(`rules-${gid}`);
+  if (!el) return;
+  if (!rules.length) {
+    el.innerHTML = '<p style="color:var(--text-muted);font-size:12px">Chưa có rule — Bug sẽ không tự gán người xử lý</p>';
+    return;
+  }
+  el.innerHTML = '<table style="width:100%"><thead><tr><th>Keyword</th><th>Assignee</th><th>OP User ID</th><th></th></tr></thead><tbody>' +
+    rules.map(r => `<tr>
+      <td><code>${r.keyword_pattern}</code></td>
+      <td>${r.op_assignee_name || '—'}</td>
+      <td style="color:var(--text-muted)">${r.op_assignee_id || '—'}</td>
+      <td><button class="action-btn" onclick="deleteRule(${r.id},${gid})">🗑</button></td>
+    </tr>`).join('') + '</tbody></table>';
+}
+
+async function addRule(gid) {
+  const keyword = prompt('Keyword pattern (ví dụ: thanh toán, QR code):');
+  if (!keyword) return;
+  const name = prompt('Tên người xử lý:') || '';
+  const opId = prompt('OpenProject User ID (số):') || '0';
+  const resp = await POST(`/api/groups/${gid}/assignment-rules`, {
+    keyword_pattern: keyword, op_assignee_name: name, op_assignee_id: parseInt(opId)
+  });
+  if (resp?.id) { toast('Đã thêm rule!'); loadRules(gid); }
+}
+
+async function deleteRule(rid, gid) {
+  if (!confirm_action('Xóa rule này?')) return;
+  const resp = await DELETE(`/api/assignment-rules/${rid}`);
+  if (resp?.ok) loadRules(gid);
+}
+
+async function testOP(gid) {
+  const statusEl = document.getElementById(`op-status-${gid}`);
+  statusEl.innerHTML = '<span style="color:var(--text-muted)">Đang kiểm tra...</span>';
+  const body = {
+    op_url: document.getElementById(`op-url-${gid}`).value,
+    op_api_key: document.getElementById(`op-key-${gid}`).value,
+    op_project_id: document.getElementById(`op-proj-${gid}`).value,
+  };
+  const resp = await POST(`/api/groups/${gid}/openproject/test`, body);
+  if (resp && resp.ok) {
+    statusEl.innerHTML = `<span style="color:var(--green)">● ${resp.project_name}</span>`;
+  } else {
+    statusEl.innerHTML = `<span style="color:var(--red)">● ${resp?.error || 'Lỗi kết nối'}</span>`;
+  }
 }
 
 document.addEventListener('DOMContentLoaded', loadMapping);

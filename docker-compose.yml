@@ -1,0 +1,15 @@
+services:
+  zalosniper:
+    build: .
+    container_name: zalosniper
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+      - ./zalo_session:/app/zalo_session
+      - ./zalosniper.db:/app/zalosniper.db
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1

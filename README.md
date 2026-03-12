@@ -44,18 +44,14 @@ Zalo Web (Playwright) → Event Bus → Orchestrator → AI Analyzer
 | **GitHub PR** | Tự động tạo PR khi approve bug (tùy chọn) |
 | **Auth Dashboard** | Đăng nhập bằng mật khẩu, đổi mật khẩu từ UI |
 
-### Đang phát triển 🚧
-
-| Tính năng | Mô tả | Ưu tiên |
-|-----------|-------|---------|
-| **Quản lý Zalo Account** | UI để thêm/xóa/relogin tài khoản Zalo | Cao |
-| **Group ↔ Project Mapping UI** | Giao diện kéo thả mapping nhóm Zalo → OpenProject project + GitHub repo | Cao |
-| **Multi-account Zalo** | Hỗ trợ nhiều tài khoản Zalo cùng lúc | Trung bình |
-| **Notification Rules** | Tùy chỉnh rule thông báo theo nhóm/loại issue | Trung bình |
-| **Analytics Dashboard** | Thống kê bug theo thời gian, nhóm, trạng thái | Thấp |
-| **Webhook Integration** | Nhận webhook từ OpenProject khi task thay đổi trạng thái | Thấp |
-| **Docker Deployment** | Dockerfile + docker-compose cho production | Cao |
-| **Auto-assign** | Tự động assign task dựa trên nội dung và lịch sử | Trung bình |
+| **Zalo Account Management** | UI quản lý session Zalo, đăng nhập QR từ dashboard |
+| **Notification Rules** | Tùy chỉnh rule thông báo per-group: tự tạo OP task, gửi Telegram |
+| **Analytics Dashboard** | Thống kê bug theo ngày/group/trạng thái với SVG charts |
+| **Auto-assign** | Tự gán người xử lý trên OP dựa trên keyword matching |
+| **Webhook Integration** | Nhận webhook từ OpenProject, đồng bộ trạng thái bug |
+| **Docker Deployment** | Dockerfile + docker-compose cho production |
+| **Multi-account Zalo** | DB + UI quản lý nhiều tài khoản Zalo |
+| **OP Test Connection** | Nút test kết nối OpenProject trong mapping UI |
 
 ## Cài đặt
 
@@ -192,31 +188,61 @@ zalosniper/
 | **Phase 2: Integration** | ✅ Done | OpenProject task, GitHub PR, image capture |
 | **Phase 3: Dashboard** | ✅ Done | Web UI: settings, chat, bugs, mapping |
 | **Phase 4: Intelligence** | ✅ Done | Bug update detection, rate limiting, hot-reload |
-| **Phase 5: Management UI** | 🚧 In Progress | Quản lý account, group mapping nâng cao |
-| **Phase 6: Production** | 📋 Planned | Docker, monitoring, auto-scaling |
+| **Phase 5: Management UI** | ✅ Done | Account management, notification rules, analytics, auto-assign |
+| **Phase 6: Production** | ✅ Done | Docker, webhook, multi-account foundation |
 
 ## Roadmap
 
-| Thời gian | Milestone | Tính năng |
-|-----------|-----------|-----------|
-| **T3/2026** | v0.5 - Management UI | Quản lý Zalo account, group↔project mapping UI |
-| **T4/2026** | v0.6 - Production Ready | Docker deployment, health checks, backup/restore |
-| **T5/2026** | v0.7 - Analytics | Dashboard thống kê, báo cáo bug trends |
-| **T6/2026** | v0.8 - Automation | Auto-assign, notification rules, webhook |
-| **Q3/2026** | v1.0 - Stable | Multi-account Zalo, plugin system |
+| Thời gian | Milestone | Tính năng | Trạng thái |
+|-----------|-----------|-----------|-----------|
+| **T3/2026** | v0.5 - Management UI | Zalo account UI, group mapping, OP test connection | ✅ Done |
+| **T3/2026** | v0.6 - Intelligence | Analytics dashboard, notification rules, auto-assign | ✅ Done |
+| **T3/2026** | v0.7 - Production | Docker deployment, webhook integration | ✅ Done |
+| **T4/2026** | v0.8 - Multi-account | Multiple Zalo browser contexts, per-account monitoring | 🚧 Planned |
+| **T5/2026** | v1.0 - Stable | Plugin system, custom AI prompts, backup/restore | 📋 Planned |
 
 ## API Endpoints
 
 | Method | Path | Mô tả |
 |--------|------|-------|
-| GET | `/api/stats` | Thống kê tổng quan |
-| GET | `/api/messages?group=...` | Lấy tin nhắn theo nhóm |
-| GET | `/api/bugs` | Danh sách bug analyses |
-| POST | `/api/bugs/{id}/action` | Approve/reject bug |
-| GET | `/api/settings` | Lấy settings |
-| POST | `/api/settings` | Cập nhật settings |
-| POST | `/api/auth/login` | Đăng nhập |
+| POST | `/api/auth/login` | Đăng nhập dashboard |
+| POST | `/api/auth/logout` | Đăng xuất |
 | POST | `/api/auth/change-password` | Đổi mật khẩu |
+| GET | `/api/status` | Trạng thái bot + thống kê |
+| GET | `/api/settings` | Lấy settings |
+| POST | `/api/settings` | Cập nhật settings (hot-reload AI) |
+| GET | `/api/groups` | Danh sách groups |
+| POST | `/api/groups` | Thêm group |
+| PATCH | `/api/groups/{id}` | Cập nhật group |
+| DELETE | `/api/groups/{id}` | Xóa group |
+| GET | `/api/groups/{id}/repos` | Repos của group |
+| POST | `/api/groups/{id}/repos` | Thêm repo |
+| PUT | `/api/groups/{id}/repos/{rid}` | Cập nhật repo |
+| DELETE | `/api/groups/{id}/repos/{rid}` | Xóa repo |
+| GET | `/api/groups/{id}/openproject` | OP config của group |
+| PUT | `/api/groups/{id}/openproject` | Lưu OP config |
+| POST | `/api/groups/{id}/openproject/test` | Test kết nối OP |
+| GET | `/api/groups/{id}/notifications` | Notification rules |
+| PUT | `/api/groups/{id}/notifications` | Cập nhật notification rules |
+| GET | `/api/groups/{id}/assignment-rules` | Auto-assign rules |
+| POST | `/api/groups/{id}/assignment-rules` | Thêm auto-assign rule |
+| DELETE | `/api/assignment-rules/{id}` | Xóa auto-assign rule |
+| GET | `/api/analytics?period=7` | Analytics (7/30/90 ngày) |
+| GET | `/api/chat` | Danh sách groups có chat |
+| GET | `/api/chat/{group}` | Tin nhắn của group |
+| DELETE | `/api/analyses/{id}` | Xóa bug analysis |
+| POST | `/api/analyses/{id}/status` | Cập nhật trạng thái bug |
+| POST | `/api/analyses/{id}/create-op-task` | Tạo OP task thủ công |
+| GET | `/api/analyses/{id}/op-info` | Thông tin OP work package |
+| GET | `/api/zalo/status` | Trạng thái Zalo session |
+| POST | `/api/zalo/login` | Đăng nhập Zalo (QR code) |
+| GET | `/api/zalo/login-status` | Kiểm tra login hoàn tất |
+| GET | `/api/zalo/accounts` | Danh sách Zalo accounts |
+| POST | `/api/zalo/accounts` | Thêm Zalo account |
+| DELETE | `/api/zalo/accounts/{id}` | Xóa Zalo account |
+| GET | `/api/github/repos` | Danh sách GitHub repos |
+| POST | `/api/webhooks/openproject` | Webhook từ OpenProject |
+| GET | `/api/logs` | System logs |
 
 ## License
 

@@ -1,0 +1,148 @@
+{% extends "base.html" %}
+{% block title %}Zalo Account{% endblock %}
+{% block content %}
+<div class="card">
+  <div class="card-header">
+    <span class="card-title">Zalo Session</span>
+    <button class="btn btn-primary btn-sm" onclick="checkSession()">🔍 Kiểm tra</button>
+  </div>
+  <div style="padding:20px" id="session-info">
+    <p style="color:var(--text-muted)">Đang tải...</p>
+  </div>
+</div>
+
+<div class="card" style="margin-top:20px">
+  <div class="card-header">
+    <span class="card-title">Đăng nhập Zalo</span>
+  </div>
+  <div style="padding:20px">
+    <p style="color:var(--text-muted);margin-bottom:16px">
+      Nhấn nút bên dưới để lấy mã QR đăng nhập Zalo. Mở Zalo trên điện thoại và quét mã QR.
+    </p>
+    <button class="btn btn-primary" onclick="startLogin()" id="login-btn">📱 Lấy mã QR đăng nhập</button>
+    <div id="qr-container" style="margin-top:16px;display:none">
+      <div style="text-align:center">
+        <img id="qr-image" style="max-width:300px;border-radius:8px;border:1px solid var(--border)" />
+        <p style="color:var(--text-muted);font-size:12px;margin-top:8px" id="qr-status">Đang chờ quét mã QR...</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="card" style="margin-top:20px">
+  <div class="card-header">
+    <span class="card-title">Zalo Accounts</span>
+    <button class="btn btn-primary btn-sm" onclick="addAccount()">+ Thêm account</button>
+  </div>
+  <table>
+    <thead><tr><th>Tên</th><th>Session Dir</th><th>Trạng thái</th><th>Lần cuối</th><th></th></tr></thead>
+    <tbody id="accounts-tbody"><tr><td colspan="5" style="text-align:center;color:var(--text-muted)">Đang tải...</td></tr></tbody>
+  </table>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+async function checkSession() {
+  const info = document.getElementById('session-info');
+  info.innerHTML = '<p style="color:var(--text-muted)">Đang kiểm tra...</p>';
+  const data = await GET('/api/zalo/status');
+  if (!data) { info.innerHTML = '<p style="color:var(--red)">Lỗi kết nối</p>'; return; }
+  const statusColor = data.zalo_running ? 'var(--green)' : 'var(--red)';
+  const statusText = data.zalo_running ? 'Online' : 'Offline';
+  const sessionColor = data.session_exists ? 'var(--green)' : 'var(--red)';
+  const sessionText = data.session_exists ? 'Tồn tại' : 'Không tìm thấy';
+  info.innerHTML = `
+    <div style="display:grid;gap:12px">
+      <div><strong>Trạng thái Zalo:</strong> <span style="color:${statusColor}">● ${statusText}</span></div>
+      <div><strong>Session file:</strong> <span style="color:${sessionColor}">● ${sessionText}</span></div>
+      <div><strong>Session dir:</strong> <code>${data.session_dir}</code></div>
+      ${data.session_exists ? `<div><strong>File size:</strong> ${(data.session_file_size / 1024).toFixed(1)} KB</div>` : ''}
+    </div>
+  `;
+}
+
+async function startLogin() {
+  const btn = document.getElementById('login-btn');
+  btn.disabled = true;
+  btn.textContent = 'Đang mở Zalo Web...';
+  const container = document.getElementById('qr-container');
+  container.style.display = 'block';
+  document.getElementById('qr-status').textContent = 'Đang khởi tạo trình duyệt...';
+
+  const resp = await POST('/api/zalo/login', {});
+  if (resp && resp.qr_image) {
+    document.getElementById('qr-image').src = 'data:image/png;base64,' + resp.qr_image;
+    document.getElementById('qr-status').textContent = 'Quét mã QR bằng Zalo trên điện thoại...';
+    // Poll for login completion
+    pollLoginStatus();
+  } else if (resp && resp.already_logged_in) {
+    document.getElementById('qr-status').innerHTML = '<span style="color:var(--green)">● Đã đăng nhập sẵn!</span>';
+    btn.disabled = false;
+    btn.textContent = '📱 Lấy mã QR đăng nhập';
+    checkSession();
+  } else {
+    document.getElementById('qr-status').innerHTML = `<span style="color:var(--red)">Lỗi: ${resp?.error || 'Không thể lấy QR'}</span>`;
+    btn.disabled = false;
+    btn.textContent = '📱 Lấy mã QR đăng nhập';
+  }
+}
+
+async function pollLoginStatus() {
+  for (let i = 0; i < 60; i++) { // poll for 2 minutes
+    await new Promise(r => setTimeout(r, 2000));
+    const resp = await GET('/api/zalo/login-status');
+    if (!resp) continue;
+    if (resp.logged_in) {
+      document.getElementById('qr-status').innerHTML = '<span style="color:var(--green)">● Đăng nhập thành công!</span>';
+      document.getElementById('login-btn').disabled = false;
+      document.getElementById('login-btn').textContent = '📱 Lấy mã QR đăng nhập';
+      checkSession();
+      return;
+    }
+    if (resp.error) {
+      document.getElementById('qr-status').innerHTML = `<span style="color:var(--red)">Lỗi: ${resp.error}</span>`;
+      break;
+    }
+  }
+  document.getElementById('login-btn').disabled = false;
+  document.getElementById('login-btn').textContent = '📱 Lấy mã QR đăng nhập';
+}
+
+async function loadAccounts() {
+  const accounts = await GET('/api/zalo/accounts') || [];
+  const tbody = document.getElementById('accounts-tbody');
+  if (!accounts.length) {
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text-muted)">Chưa có account phụ (đang dùng session mặc định)</td></tr>';
+  } else {
+    tbody.innerHTML = accounts.map(a => {
+      const statusColor = a.status === 'active' ? 'var(--green)' : 'var(--text-muted)';
+      return `<tr>
+        <td><strong>${a.name}</strong></td>
+        <td><code>${a.session_dir}</code></td>
+        <td><span style="color:${statusColor}">● ${a.status}</span></td>
+        <td style="color:var(--text-muted)">${a.last_login || '—'}</td>
+        <td><button class="action-btn" onclick="deleteAccount(${a.id},'${a.name}')">🗑</button></td>
+      </tr>`;
+    }).join('');
+  }
+}
+
+async function addAccount() {
+  const name = prompt('Tên account:');
+  if (!name) return;
+  const dir = prompt('Session directory:', 'zalo_session_2');
+  if (!dir) return;
+  const resp = await POST('/api/zalo/accounts', { name, session_dir: dir });
+  if (resp?.id) { toast('Đã thêm account!'); loadAccounts(); }
+  else toast(resp?.error || 'Lỗi', 'error');
+}
+
+async function deleteAccount(id, name) {
+  if (!confirm_action(`Xóa account "${name}"?`)) return;
+  const resp = await DELETE(`/api/zalo/accounts/${id}`);
+  if (resp?.ok) { toast('Đã xóa'); loadAccounts(); }
+}
+
+document.addEventListener('DOMContentLoaded', () => { checkSession(); loadAccounts(); });
+</script>
+{% endblock %}

@@ -167,6 +167,11 @@ class Orchestrator:
         is_bug = triage.get("type") == "bug_report"
         action = triage.get("action", "new")
 
+        # Check notification rules for this group
+        rules = await self._db.get_notification_rules_by_group_name(group_name)
+        should_notify_telegram = rules.get("notify_telegram", 1)
+        should_create_op = rules.get("auto_create_op_task", 1)
+
         # Mark all messages as processed so they won't be included in future notifications
         await self._db.mark_messages_processed(msg_ids)
 
@@ -218,16 +223,17 @@ class Orchestrator:
 
         if not is_bug:
             # Non-bug: just send a plain summary, no buttons
-            lines = [
-                f"[{now_str}] Nhom: {group_name} — {len(messages)} tin nhan moi",
-                "",
-                f"Tom tat: {summary}",
-                "(Khong co bug report)",
-            ]
-            await self._telegram.send_message(
-                group_config.telegram_chat_id,
-                "\n".join(lines),
-            )
+            if should_notify_telegram:
+                lines = [
+                    f"[{now_str}] Nhom: {group_name} — {len(messages)} tin nhan moi",
+                    "",
+                    f"Tom tat: {summary}",
+                    "(Khong co bug report)",
+                ]
+                await self._telegram.send_message(
+                    group_config.telegram_chat_id,
+                    "\n".join(lines),
+                )
             return
 
         # Bug detected: save analysis first so we have an ID for buttons
@@ -239,6 +245,11 @@ class Orchestrator:
         )
         analysis_id = await self._db.insert_bug_analysis(analysis)
         analysis.id = analysis_id
+
+        # If notification rules say skip telegram, just save and return
+        if not should_notify_telegram:
+            logger.info(f"Bug #{analysis_id} saved but Telegram notification disabled for [{group_name}]")
+            return
 
         # Build single combined message: summary + issues + buttons
         lines = [
@@ -254,6 +265,32 @@ class Orchestrator:
                 lines.append(f"   Mo ta: {issue.get('description', '')}")
                 lines.append(f"   Huong xu ly: {issue.get('proposed_solution', '')}")
         lines.append(f"\nBug ID: {analysis_id}")
+
+        # If auto-create OP task is enabled, create task immediately without waiting for approval
+        if should_create_op:
+            try:
+                op = group_config.openproject
+                op_client = OpenProjectClient(url=op.url, api_key=op.api_key)
+                op_id, op_url = await op_client.create_work_package(
+                    project_id=op.project_id,
+                    title=f"Bug: {summary}",
+                    description=f"**Tóm tắt:** {summary}",
+                )
+                if op_id:
+                    # Upload images
+                    await self._upload_message_images(op_client, op_id, messages)
+                    # Auto-assign if matching rule exists
+                    match = await self._db.match_assignment_rule(group_name, summary)
+                    if match and match.get("op_assignee_id"):
+                        await op_client.assign_work_package(op_id, match["op_assignee_id"])
+                        logger.info(f"Auto-assigned WP #{op_id} to {match.get('op_assignee_name', match['op_assignee_id'])}")
+                    await self._db.update_bug_analysis_status(
+                        analysis_id, BugStatus.PENDING,
+                        op_work_package_id=op_id, op_work_package_url=op_url,
+                    )
+                    lines.append(f"\nOpenProject: {op_url}")
+            except Exception as e:
+                logger.error(f"Auto-create OP task failed for Bug #{analysis_id}: {e}")
 
         # Send ONE message with summary + action buttons
         msg_id = await self._telegram.send_bug_notification_with_text(
@@ -365,6 +402,12 @@ class Orchestrator:
                 all_msgs = await self._db.get_recent_messages(analysis.group_name, limit=100, within_hours=24)
                 image_msgs = [m for m in all_msgs if m.id in analysis.message_ids and m.image_path]
                 await self._upload_message_images(op_client, op_id, image_msgs)
+            # Auto-assign if matching rule exists
+            if op_id:
+                match = await self._db.match_assignment_rule(analysis.group_name, approve_summary)
+                if match and match.get("op_assignee_id"):
+                    await op_client.assign_work_package(op_id, match["op_assignee_id"])
+                    logger.info(f"Auto-assigned WP #{op_id} to {match.get('op_assignee_name', match['op_assignee_id'])}")
         except Exception as e:
             logger.error(f"OpenProject create_work_package failed: {e}")
             await self._telegram.send_message(
@@ -465,6 +508,12 @@ class Orchestrator:
                 image_msgs = [m for m in (msg_map.get(mid) for mid in analysis.message_ids)
                               if m and m.image_path]
                 await self._upload_message_images(op_client, op_id, image_msgs)
+            # Auto-assign if matching rule exists
+            if op_id:
+                match = await self._db.match_assignment_rule(analysis.group_name, summary)
+                if match and match.get("op_assignee_id"):
+                    await op_client.assign_work_package(op_id, match["op_assignee_id"])
+                    logger.info(f"Auto-assigned WP #{op_id} to {match.get('op_assignee_name', match['op_assignee_id'])}")
 
             await self._db.update_bug_analysis_status(
                 analysis_id, BugStatus.TASK_ONLY,

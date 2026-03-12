@@ -85,6 +85,33 @@ CREATE TABLE IF NOT EXISTS group_openproject (
 PRAGMA foreign_keys = ON;
 """
 
+SCHEMA_V3 = """
+CREATE TABLE IF NOT EXISTS notification_rules (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id            INTEGER NOT NULL UNIQUE REFERENCES zalo_groups(id) ON DELETE CASCADE,
+    auto_create_op_task INTEGER NOT NULL DEFAULT 1,
+    notify_telegram     INTEGER NOT NULL DEFAULT 1,
+    min_severity        TEXT NOT NULL DEFAULT 'all'
+);
+
+CREATE TABLE IF NOT EXISTS assignment_rules (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id         INTEGER REFERENCES zalo_groups(id) ON DELETE CASCADE,
+    keyword_pattern  TEXT NOT NULL,
+    op_assignee_id   INTEGER,
+    op_assignee_name TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS zalo_accounts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    session_dir TEXT NOT NULL UNIQUE,
+    status      TEXT NOT NULL DEFAULT 'inactive',
+    last_login  TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"""
+
 
 class Database:
     def __init__(self, path: str = "zalosniper.db") -> None:
@@ -96,6 +123,7 @@ class Database:
         self._conn.row_factory = aiosqlite.Row
         await self._conn.executescript(SCHEMA)
         await self._conn.executescript(SCHEMA_V2)
+        await self._conn.executescript(SCHEMA_V3)
         await self._conn.commit()
         await self._migrate_image_path()
 
@@ -527,6 +555,154 @@ class Database:
             "pending": pending,
             "prs_created": prs_created,
             "recent_analyses": recent,
+        }
+
+
+    # --- Notification Rules ---
+
+    async def get_notification_rules(self, group_id: int) -> dict:
+        async with self._conn.execute(
+            "SELECT * FROM notification_rules WHERE group_id = ?", (group_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if row:
+            return dict(row)
+        return {"group_id": group_id, "auto_create_op_task": 1, "notify_telegram": 1, "min_severity": "all"}
+
+    async def upsert_notification_rules(self, group_id: int, auto_create_op_task: int, notify_telegram: int, min_severity: str = "all") -> None:
+        await self._conn.execute(
+            """INSERT INTO notification_rules (group_id, auto_create_op_task, notify_telegram, min_severity)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(group_id) DO UPDATE SET
+                   auto_create_op_task=excluded.auto_create_op_task,
+                   notify_telegram=excluded.notify_telegram,
+                   min_severity=excluded.min_severity""",
+            (group_id, auto_create_op_task, notify_telegram, min_severity),
+        )
+        await self._conn.commit()
+
+    async def get_notification_rules_by_group_name(self, group_name: str) -> dict:
+        async with self._conn.execute(
+            """SELECT nr.* FROM notification_rules nr
+               JOIN zalo_groups zg ON nr.group_id = zg.id
+               WHERE zg.group_name = ?""",
+            (group_name,),
+        ) as cur:
+            row = await cur.fetchone()
+        if row:
+            return dict(row)
+        return {"auto_create_op_task": 1, "notify_telegram": 1, "min_severity": "all"}
+
+    # --- Assignment Rules ---
+
+    async def get_assignment_rules(self, group_id: int = None) -> list:
+        if group_id:
+            query = "SELECT * FROM assignment_rules WHERE group_id = ? ORDER BY id"
+            params = (group_id,)
+        else:
+            query = "SELECT * FROM assignment_rules ORDER BY id"
+            params = ()
+        async with self._conn.execute(query, params) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def add_assignment_rule(self, group_id: int, keyword_pattern: str, op_assignee_id: int, op_assignee_name: str) -> int:
+        async with self._conn.execute(
+            "INSERT INTO assignment_rules (group_id, keyword_pattern, op_assignee_id, op_assignee_name) VALUES (?, ?, ?, ?)",
+            (group_id, keyword_pattern, op_assignee_id, op_assignee_name),
+        ) as cur:
+            await self._conn.commit()
+            return cur.lastrowid
+
+    async def delete_assignment_rule(self, rule_id: int) -> bool:
+        async with self._conn.execute("DELETE FROM assignment_rules WHERE id = ?", (rule_id,)) as cur:
+            await self._conn.commit()
+            return cur.rowcount > 0
+
+    async def match_assignment_rule(self, group_name: str, summary: str) -> Optional[dict]:
+        async with self._conn.execute(
+            """SELECT ar.* FROM assignment_rules ar
+               JOIN zalo_groups zg ON ar.group_id = zg.id
+               WHERE zg.group_name = ?""",
+            (group_name,),
+        ) as cur:
+            rules = [dict(r) for r in await cur.fetchall()]
+        summary_lower = summary.lower()
+        for rule in rules:
+            if rule["keyword_pattern"].lower() in summary_lower:
+                return rule
+        return None
+
+    # --- Zalo Accounts ---
+
+    async def get_all_zalo_accounts(self) -> list:
+        async with self._conn.execute("SELECT * FROM zalo_accounts ORDER BY id") as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def add_zalo_account(self, name: str, session_dir: str) -> int:
+        async with self._conn.execute(
+            "INSERT INTO zalo_accounts (name, session_dir) VALUES (?, ?)",
+            (name, session_dir),
+        ) as cur:
+            await self._conn.commit()
+            return cur.lastrowid
+
+    async def update_zalo_account_status(self, account_id: int, status: str) -> bool:
+        async with self._conn.execute(
+            "UPDATE zalo_accounts SET status = ?, last_login = datetime('now') WHERE id = ?",
+            (status, account_id),
+        ) as cur:
+            await self._conn.commit()
+            return cur.rowcount > 0
+
+    async def delete_zalo_account(self, account_id: int) -> bool:
+        async with self._conn.execute(
+            "DELETE FROM zalo_accounts WHERE id = ?", (account_id,)
+        ) as cur:
+            await self._conn.commit()
+            return cur.rowcount > 0
+
+    # --- Webhook lookup ---
+
+    async def get_analysis_by_op_id(self, op_work_package_id: int) -> Optional[BugAnalysis]:
+        async with self._conn.execute(
+            "SELECT * FROM bug_analyses WHERE op_work_package_id = ?", (op_work_package_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        return _row_to_analysis(row) if row else None
+
+    # --- Analytics ---
+
+    async def get_analytics(self, period_days: int = 7) -> dict:
+        period_param = f"-{period_days}"
+        async with self._conn.execute(
+            """SELECT date(created_at) as day, COUNT(*) as count
+               FROM bug_analyses
+               WHERE created_at >= datetime('now', ? || ' days')
+               GROUP BY date(created_at) ORDER BY day""",
+            (period_param,),
+        ) as cur:
+            bugs_by_day = [dict(r) for r in await cur.fetchall()]
+        async with self._conn.execute(
+            """SELECT group_name, COUNT(*) as count
+               FROM bug_analyses
+               WHERE created_at >= datetime('now', ? || ' days')
+               GROUP BY group_name ORDER BY count DESC""",
+            (period_param,),
+        ) as cur:
+            bugs_by_group = [dict(r) for r in await cur.fetchall()]
+        async with self._conn.execute(
+            """SELECT status, COUNT(*) as count
+               FROM bug_analyses
+               WHERE created_at >= datetime('now', ? || ' days')
+               GROUP BY status ORDER BY count DESC""",
+            (period_param,),
+        ) as cur:
+            bugs_by_status = [dict(r) for r in await cur.fetchall()]
+        return {
+            "bugs_by_day": bugs_by_day,
+            "bugs_by_group": bugs_by_group,
+            "bugs_by_status": bugs_by_status,
+            "period_days": period_days,
         }
 
 

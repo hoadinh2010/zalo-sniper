@@ -88,6 +88,8 @@ async def run(
         on_callback=lambda aid, action, uid: orchestrator_ref[0].handle_callback(aid, action, uid),
     )
 
+    bot_state["telegram"] = telegram
+
     orchestrator = Orchestrator(config, db, bus, ai, code_agent, github, telegram, bot_state=bot_state)
     orchestrator_ref.append(orchestrator)
 

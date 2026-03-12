@@ -138,5 +138,26 @@ class OpenProjectClient:
             return False
 
 
+    async def assign_work_package(self, work_package_id: int, assignee_id: int) -> bool:
+        payload = {
+            "_links": {
+                "assignee": {"href": f"/api/v3/users/{assignee_id}"}
+            }
+        }
+        url = f"{self._base}/api/v3/work_packages/{work_package_id}"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.patch(url, json=payload, headers=self._headers) as resp:
+                    if resp.status in (200, 201):
+                        return True
+                    else:
+                        body = await resp.text()
+                        logger.error(f"OP assign error {resp.status}: {body}")
+                        return False
+        except Exception as e:
+            logger.error(f"OP assign failed: {e}")
+            return False
+
+
 def _encode_api_key(api_key: str) -> str:
     return base64.b64encode(f"apikey:{api_key}".encode()).decode()
