@@ -9,3 +9,6 @@ __pycache__/
 repos/
 .venv/
 .superpowers/
+data/
+.claude/
+docs/superpowers/
